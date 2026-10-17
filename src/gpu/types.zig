@@ -108,6 +108,13 @@ pub const MetalSwapchain = struct {
     depth_stencil_texture: ?*const anyopaque = null,
     msaa_color_texture: ?*const anyopaque = null,
 };
+/// D3D12 swapchain targets (zicr extension): ID3D12Resource pointers; the
+/// backend creates the render target and depth stencil views itself.
+pub const D3d12Swapchain = struct {
+    render_target: ?*const anyopaque = null,
+    resolve_target: ?*const anyopaque = null,
+    depth_stencil_target: ?*const anyopaque = null,
+};
 pub const D3d11Swapchain = struct {
     render_view: ?*const anyopaque = null,
     resolve_view: ?*const anyopaque = null,
@@ -140,6 +147,7 @@ pub const Swapchain = struct {
     depth_format: enums.PixelFormat = .default,
     metal: MetalSwapchain = .{},
     d3d11: D3d11Swapchain = .{},
+    d3d12: D3d12Swapchain = .{},
     wgpu: WgpuSwapchain = .{},
     vulkan: VulkanSwapchain = .{},
     gl: GlSwapchain = .{},
@@ -801,6 +809,11 @@ pub const EnvironmentDefaults = struct {
 pub const MetalEnvironment = struct {
     device: ?*const anyopaque = null,
 };
+/// D3D12 device and direct command queue (zicr extension): ID3D12Device and ID3D12CommandQueue.
+pub const D3d12Environment = struct {
+    device: ?*const anyopaque = null,
+    queue: ?*const anyopaque = null,
+};
 pub const D3d11Environment = struct {
     device: ?*const anyopaque = null,
     device_context: ?*const anyopaque = null,
@@ -832,6 +845,7 @@ pub const Environment = struct {
     defaults: EnvironmentDefaults = .{},
     metal: MetalEnvironment = .{},
     d3d11: D3d11Environment = .{},
+    d3d12: D3d12Environment = .{},
     wgpu: WgpuEnvironment = .{},
     vulkan: VulkanEnvironment = .{},
 };

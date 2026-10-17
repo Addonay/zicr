@@ -636,6 +636,12 @@ pub fn message(item: LogItem) [:0]const u8 {
         .validate_readimage_bytesperrow => "VALIDATE_READIMAGE_BYTESPERROW: read image: bytes per row must be >= the row size of the region",
         .validate_readimage_bytesperslice => "VALIDATE_READIMAGE_BYTESPERSLICE: read image: bytes per slice must be >= rows * bytes per row",
         .validate_readimage_dst_size => "VALIDATE_READIMAGE_DST_SIZE: read image: the destination is too small for the region",
+        .validate_beginpass_swapchain_d3d12_expect_rendertarget => "VALIDATE_BEGINPASS_SWAPCHAIN_D3D12_EXPECT_RENDERTARGET: sg_begin_pass: expected pass.swapchain.d3d12.render_target != 0",
+        .validate_beginpass_swapchain_d3d12_expect_rendertarget_notset => "VALIDATE_BEGINPASS_SWAPCHAIN_D3D12_EXPECT_RENDERTARGET_NOTSET: sg_begin_pass: expected pass.swapchain.d3d12.render_target == 0",
+        .validate_beginpass_swapchain_d3d12_expect_depthstenciltarget => "VALIDATE_BEGINPASS_SWAPCHAIN_D3D12_EXPECT_DEPTHSTENCILTARGET: sg_begin_pass: expected pass.swapchain.d3d12.depth_stencil_target != 0",
+        .validate_beginpass_swapchain_d3d12_expect_depthstenciltarget_notset => "VALIDATE_BEGINPASS_SWAPCHAIN_D3D12_EXPECT_DEPTHSTENCILTARGET_NOTSET: sg_begin_pass: expected pass.swapchain.d3d12.depth_stencil_target == 0",
+        .validate_beginpass_swapchain_d3d12_expect_resolvetarget => "VALIDATE_BEGINPASS_SWAPCHAIN_D3D12_EXPECT_RESOLVETARGET: sg_begin_pass: expected pass.swapchain.d3d12.resolve_target != 0",
+        .validate_beginpass_swapchain_d3d12_expect_resolvetarget_notset => "VALIDATE_BEGINPASS_SWAPCHAIN_D3D12_EXPECT_RESOLVETARGET_NOTSET: sg_begin_pass: expected pass.swapchain.d3d12.resolve_target == 0",
         _ => "unknown log item",
     };
 }

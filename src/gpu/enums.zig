@@ -8,6 +8,8 @@ pub const Backend = enum(u32) {
     wgpu = 6,
     vulkan = 7,
     dummy = 8,
+    // zicr extension
+    d3d12 = 9,
     _,
 };
 pub const PixelFormat = enum(u32) {
@@ -956,5 +958,11 @@ pub const LogItem = enum(u32) {
     validate_readimage_bytesperrow = 610,
     validate_readimage_bytesperslice = 611,
     validate_readimage_dst_size = 612,
+    validate_beginpass_swapchain_d3d12_expect_rendertarget = 613,
+    validate_beginpass_swapchain_d3d12_expect_rendertarget_notset = 614,
+    validate_beginpass_swapchain_d3d12_expect_depthstenciltarget = 615,
+    validate_beginpass_swapchain_d3d12_expect_depthstenciltarget_notset = 616,
+    validate_beginpass_swapchain_d3d12_expect_resolvetarget = 617,
+    validate_beginpass_swapchain_d3d12_expect_resolvetarget_notset = 618,
     _,
 };

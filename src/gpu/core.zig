@@ -140,6 +140,7 @@ pub fn Native(comptime Desc: type) type {
         vulkan: @import("backends/vulkan/resources.zig").Resource(Desc),
         wgpu: @import("backends/wgpu/resources.zig").Resource(Desc),
         metal: @import("backends/metal/resources.zig").Resource(Desc),
+        d3d12: @import("backends/d3d12/resources.zig").Resource(Desc),
     };
 }
 

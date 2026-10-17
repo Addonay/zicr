@@ -38,6 +38,9 @@ fn enabled() bool {
 fn isGl(backend: e.Backend) bool {
     return backend == .glcore or backend == .gles3;
 }
+fn isD3d(backend: e.Backend) bool {
+    return backend == .d3d11 or backend == .d3d12;
+}
 fn isMetal(backend: e.Backend) bool {
     return backend == .metal_ios or backend == .metal_macos or backend == .metal_simulator;
 }
@@ -262,7 +265,7 @@ pub fn shaderDesc(desc: *const t.ShaderDesc) bool {
             v.check(desc.vertex_func.source != null, .validate_shaderdesc_vertex_source);
             v.check(desc.fragment_func.source != null, .validate_shaderdesc_fragment_source);
         }
-    } else if (isMetal(backend) or backend == .d3d11) {
+    } else if (isMetal(backend) or isD3d(backend)) {
         // on Metal or D3D11, must provide shader source code or byte code
         if (is_compute_shader) {
             v.check(desc.compute_func.source != null or desc.compute_func.bytecode.ptr != null, .validate_shaderdesc_compute_source_or_bytecode);
@@ -311,7 +314,7 @@ pub fn shaderDesc(desc: *const t.ShaderDesc) bool {
         v.check(ub.size > 0, .validate_shaderdesc_uniformblock_size_is_zero);
         if (isMetal(backend)) {
             msl_buf.claim(&v, ub.stage, ub.msl_buffer_n, .validate_shaderdesc_uniformblock_metal_buffer_slot_collision);
-        } else if (backend == .d3d11) {
+        } else if (isD3d(backend)) {
             hlsl_buf.claim(&v, ub.stage, ub.hlsl_register_b_n, .validate_shaderdesc_uniformblock_hlsl_register_b_collision);
         } else if (backend == .wgpu) {
             wgsl_group0.claim(&v, .none, ub.wgsl_group0_binding_n, .validate_shaderdesc_uniformblock_wgsl_group0_binding_collision);
@@ -351,7 +354,7 @@ pub fn shaderDesc(desc: *const t.ShaderDesc) bool {
             texview_slot_mask |= @as(u32, 1) << @intCast(view_idx);
             if (isMetal(backend)) {
                 msl_tex.claim(&v, tex.stage, tex.msl_texture_n, .validate_shaderdesc_view_texture_metal_texture_slot_collision);
-            } else if (backend == .d3d11) {
+            } else if (isD3d(backend)) {
                 hlsl_srv.claim(&v, tex.stage, tex.hlsl_register_t_n, .validate_shaderdesc_view_texture_hlsl_register_t_collision);
             } else if (backend == .wgpu) {
                 wgsl_group1.claim(&v, .none, tex.wgsl_group1_binding_n, .validate_shaderdesc_view_texture_wgsl_group1_binding_collision);
@@ -365,7 +368,7 @@ pub fn shaderDesc(desc: *const t.ShaderDesc) bool {
             }
             if (isMetal(backend)) {
                 msl_buf.claim(&v, sbuf.stage, sbuf.msl_buffer_n, .validate_shaderdesc_view_storagebuffer_metal_buffer_slot_collision);
-            } else if (backend == .d3d11) {
+            } else if (isD3d(backend)) {
                 if (sbuf.readonly) {
                     hlsl_srv.claim(&v, sbuf.stage, sbuf.hlsl_register_t_n, .validate_shaderdesc_view_storagebuffer_hlsl_register_t_collision);
                 } else {
@@ -383,7 +386,7 @@ pub fn shaderDesc(desc: *const t.ShaderDesc) bool {
             v.check(simg.stage == .compute, .validate_shaderdesc_view_storageimage_expect_compute_stage);
             if (isMetal(backend)) {
                 msl_tex.claim(&v, simg.stage, simg.msl_texture_n, .validate_shaderdesc_view_storageimage_metal_texture_slot_collision);
-            } else if (backend == .d3d11) {
+            } else if (isD3d(backend)) {
                 hlsl_uav.claim(&v, simg.stage, simg.hlsl_register_u_n, .validate_shaderdesc_view_storageimage_hlsl_register_u_collision);
             } else if (isGl(backend)) {
                 glsl_simg.claim(&v, .none, simg.glsl_binding_n, .validate_shaderdesc_view_storageimage_glsl_binding_collision);
@@ -401,7 +404,7 @@ pub fn shaderDesc(desc: *const t.ShaderDesc) bool {
         smp_slot_mask |= @as(u32, 1) << @intCast(smp_idx);
         if (isMetal(backend)) {
             msl_smp.claim(&v, smp.stage, smp.msl_sampler_n, .validate_shaderdesc_sampler_metal_sampler_slot_collision);
-        } else if (backend == .d3d11) {
+        } else if (isD3d(backend)) {
             hlsl_smp.claim(&v, smp.stage, smp.hlsl_register_s_n, .validate_shaderdesc_sampler_hlsl_register_s_collision);
         } else if (backend == .wgpu) {
             wgsl_group1.claim(&v, .none, smp.wgsl_group1_binding_n, .validate_shaderdesc_sampler_wgsl_group1_binding_collision);
@@ -698,6 +701,19 @@ pub fn beginPass(pass: *const t.Pass) bool {
             } else {
                 v.check(sc.metal.msaa_color_texture == null, .validate_beginpass_swapchain_metal_expect_msaacolortexture_notset);
             }
+        } else if (backend == .d3d12) {
+            const dx = &sc.d3d12;
+            v.check(dx.render_target != null, .validate_beginpass_swapchain_d3d12_expect_rendertarget);
+            if (sc.depth_format == .none) {
+                v.check(dx.depth_stencil_target == null, .validate_beginpass_swapchain_d3d12_expect_depthstenciltarget_notset);
+            } else {
+                v.check(dx.depth_stencil_target != null, .validate_beginpass_swapchain_d3d12_expect_depthstenciltarget);
+            }
+            if (sc.sample_count > 1) {
+                v.check(dx.resolve_target != null, .validate_beginpass_swapchain_d3d12_expect_resolvetarget);
+            } else {
+                v.check(dx.resolve_target == null, .validate_beginpass_swapchain_d3d12_expect_resolvetarget_notset);
+            }
         } else if (backend == .d3d11) {
             v.check(sc.d3d11.render_view != null, .validate_beginpass_swapchain_d3d11_expect_renderview);
             if (sc.depth_format == .none) {
@@ -808,6 +824,10 @@ pub fn beginPass(pass: *const t.Pass) bool {
             v.check(sc.metal.current_drawable == null, .validate_beginpass_swapchain_metal_expect_currentdrawable_notset);
             v.check(sc.metal.depth_stencil_texture == null, .validate_beginpass_swapchain_metal_expect_depthstenciltexture_notset);
             v.check(sc.metal.msaa_color_texture == null, .validate_beginpass_swapchain_metal_expect_msaacolortexture_notset);
+        } else if (backend == .d3d12) {
+            v.check(sc.d3d12.render_target == null, .validate_beginpass_swapchain_d3d12_expect_rendertarget_notset);
+            v.check(sc.d3d12.depth_stencil_target == null, .validate_beginpass_swapchain_d3d12_expect_depthstenciltarget_notset);
+            v.check(sc.d3d12.resolve_target == null, .validate_beginpass_swapchain_d3d12_expect_resolvetarget_notset);
         } else if (backend == .d3d11) {
             v.check(sc.d3d11.render_view == null, .validate_beginpass_swapchain_d3d11_expect_renderview_notset);
             v.check(sc.d3d11.depth_stencil_view == null, .validate_beginpass_swapchain_d3d11_expect_depthstencilview_notset);

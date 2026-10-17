@@ -19,7 +19,7 @@ pub fn desc(value: t.Desc, backend: e.Backend) t.Desc {
         std.debug.assert(@backingInt(env.color_format) > @backingInt(e.PixelFormat.none));
     } else {
         env.color_format = resolve(e.PixelFormat, env.color_format, switch (backend) {
-            .metal_ios, .metal_macos, .metal_simulator, .d3d11 => .bgra8,
+            .metal_ios, .metal_macos, .metal_simulator, .d3d11, .d3d12 => .bgra8,
             else => .rgba8,
         });
     }

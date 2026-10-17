@@ -37,7 +37,7 @@ test "a device is exclusive and reports its backend" {
 }
 
 test "unavailable backends and invalid options fail without a device" {
-    try std.testing.expectError(error.BackendUnavailable, gpu.Device.init(std.testing.allocator, .{ .backend = .{ .d3d12 = .{ .device = @ptrFromInt(8), .queue = @ptrFromInt(8) } } }));
+    try std.testing.expectError(error.BackendUnavailable, gpu.Device.init(std.testing.allocator, .{ .backend = .{ .metal = .{ .device = @ptrFromInt(8) } } }));
     try std.testing.expectError(error.InvalidOptions, gpu.Device.init(std.testing.allocator, .{ .backend = .dummy, .pools = .{ .buffers = 0 } }));
     var dev = try testDevice(.{ .backend = .dummy });
     dev.deinit();

@@ -322,7 +322,10 @@ pub const Device = struct {
                 };
                 break :blk .vulkan;
             },
-            .d3d12 => return error.BackendUnavailable,
+            .d3d12 => |dx| blk: {
+                desc.environment.d3d12 = .{ .device = dx.device, .queue = dx.queue };
+                break :blk .d3d12;
+            },
             .d3d11 => |dx| blk: {
                 desc.environment.d3d11 = .{ .device = dx.device, .device_context = dx.device_context };
                 desc.d3d11.shader_debugging = dx.shader_debugging;
@@ -371,6 +374,7 @@ pub const Device = struct {
             .glcore => .gl,
             .gles3 => .gles,
             .d3d11 => .d3d11,
+            .d3d12 => .d3d12,
             .metal_ios, .metal_macos, .metal_simulator => .metal,
             .wgpu => .wgpu,
             .vulkan => .vulkan,
@@ -1489,6 +1493,8 @@ pub const Swapchain = struct {
         gl: struct { framebuffer: u32 = 0 },
         metal: struct { current_drawable: *const anyopaque, depth_stencil_texture: ?*const anyopaque = null, msaa_color_texture: ?*const anyopaque = null },
         d3d11: struct { render_view: *const anyopaque, resolve_view: ?*const anyopaque = null, depth_stencil_view: ?*const anyopaque = null },
+        /// ID3D12Resource pointers; the device creates the views.
+        d3d12: struct { render_target: *const anyopaque, resolve_target: ?*const anyopaque = null, depth_stencil_target: ?*const anyopaque = null },
         wgpu: struct { render_view: *const anyopaque, resolve_view: ?*const anyopaque = null, depth_stencil_view: ?*const anyopaque = null },
         vulkan: struct {
             render_image: *const anyopaque,
@@ -1516,6 +1522,7 @@ pub const Swapchain = struct {
             .gl => |gl| res.gl = .{ .framebuffer = gl.framebuffer },
             .metal => |mtl| res.metal = .{ .current_drawable = mtl.current_drawable, .depth_stencil_texture = mtl.depth_stencil_texture, .msaa_color_texture = mtl.msaa_color_texture },
             .d3d11 => |dx| res.d3d11 = .{ .render_view = dx.render_view, .resolve_view = dx.resolve_view, .depth_stencil_view = dx.depth_stencil_view },
+            .d3d12 => |dx| res.d3d12 = .{ .render_target = dx.render_target, .resolve_target = dx.resolve_target, .depth_stencil_target = dx.depth_stencil_target },
             .wgpu => |w| res.wgpu = .{ .render_view = w.render_view, .resolve_view = w.resolve_view, .depth_stencil_view = w.depth_stencil_view },
             .vulkan => |vk| res.vulkan = .{
                 .render_image = vk.render_image,

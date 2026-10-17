@@ -15,11 +15,11 @@ void main() {
 
 // a gradient: (x * 16, y * 16, 128, 255)
 @cs fill_image_cs
-layout(binding=0, rgba8) uniform writeonly image2D target;
+layout(binding=0, rgba8) uniform writeonly image2D dst_image;
 layout(local_size_x=8, local_size_y=4) in;
 void main() {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
-    imageStore(target, p, vec4(float(p.x * 16) / 255.0, float(p.y * 16) / 255.0, 128.0 / 255.0, 1.0));
+    imageStore(dst_image, p, vec4(float(p.x * 16) / 255.0, float(p.y * 16) / 255.0, 128.0 / 255.0, 1.0));
 }
 @end
 @program fill_image fill_image_cs
