@@ -543,10 +543,11 @@ pub const Device = struct {
     /// Writes a region of an image, see `writeBuffer` for when writes are allowed.
     pub fn writeImage(self: *Device, image: Image, region: ImageRegion, data: []const u8, layout: DataLayout) void {
         _ = self;
+        const transfer = resolveTransfer(image, region, layout);
         const desc: t.WriteImageDesc = .{
-            .src = .{ .data = rangeOf(data), .bytes_per_row = layout.bytesPerRow(), .bytes_per_slice = layout.bytesPerSlice() },
+            .src = .{ .data = rangeOf(data), .bytes_per_row = transfer.bytes_per_row, .bytes_per_slice = transfer.bytes_per_slice },
             .dst = region.location(image),
-            .size = region.extent(),
+            .size = transfer.extent,
         };
         if (core.lookupImage(id(image))) |img| if (img.slot.state == .unsealed) return validated(internal.writeImageUnsealed, .{desc});
         validated(internal.writeImageTransient, .{desc});
@@ -573,10 +574,11 @@ pub const Device = struct {
 
     pub fn copyBufferToImage(self: *Device, copy: BufferToImageCopy) void {
         _ = self;
+        const transfer = resolveTransfer(copy.dst, copy.region, copy.layout);
         validated(internal.copyBufferToImage, .{t.CopyBufferToImageDesc{
-            .src = .{ .buffer = .{ .id = id(copy.src) }, .offset = copy.src_offset, .bytes_per_row = copy.layout.bytesPerRow(), .bytes_per_slice = copy.layout.bytesPerSlice() },
+            .src = .{ .buffer = .{ .id = id(copy.src) }, .offset = copy.src_offset, .bytes_per_row = transfer.bytes_per_row, .bytes_per_slice = transfer.bytes_per_slice },
             .dst = copy.region.location(copy.dst),
-            .size = copy.region.extent(),
+            .size = transfer.extent,
         }});
     }
 
@@ -947,6 +949,28 @@ pub const ImageRegion = struct {
         return .{ .width = optionalInt(self.width), .height = optionalInt(self.height), .num_slices = optionalInt(self.slices) };
     }
 };
+
+const Transfer = struct { extent: t.ImageExtent, bytes_per_row: i32, bytes_per_slice: i32 };
+
+/// Resolves a region's default size to the end of its mip level and the
+/// default pitches to tightly packed rows and slices of the region.
+fn resolveTransfer(image: Image, region: ImageRegion, layout: DataLayout) Transfer {
+    var res: Transfer = .{ .extent = region.extent(), .bytes_per_row = layout.bytesPerRow(), .bytes_per_slice = layout.bytesPerSlice() };
+    const img = core.lookupImage(id(image)) orelse return res;
+    const cmn = &img.cmn;
+    if (region.mip_level >= cmn.num_mipmaps) return res;
+    const mip: i32 = @intCast(region.mip_level);
+    const formats = core.formats;
+    if (res.extent.width == 0) res.extent.width = @max(core.miplevelDim(cmn.width, mip) - int(region.x), 0);
+    if (res.extent.height == 0) res.extent.height = @max(core.miplevelDim(cmn.height, mip) - int(region.y), 0);
+    if (res.extent.num_slices == 0) {
+        const slices = if (cmn.type == .@"3d") core.miplevelDim(cmn.num_slices, mip) else cmn.num_slices;
+        res.extent.num_slices = @max(slices - int(region.slice), 0);
+    }
+    if (res.bytes_per_row == 0 and res.extent.width > 0) res.bytes_per_row = formats.rowPitch(cmn.pixel_format, res.extent.width, 1);
+    if (res.bytes_per_slice == 0 and res.extent.height > 0) res.bytes_per_slice = formats.numRows(cmn.pixel_format, res.extent.height) * res.bytes_per_row;
+    return res;
+}
 
 /// The memory layout of image data; null pitches are tightly packed.
 pub const DataLayout = struct {

@@ -53,6 +53,21 @@ pub fn build(b: *std.Build) void {
     fuzz_run.addPassthruArgs();
     b.step("test-diff", "Differential fuzzing of the core against the original C sokol_gfx.h").dependOn(&fuzz_run.step);
 
+    // ------------------------------------------------------------ scene suite
+
+    // the same scenes on every backend, compared with CPU-computed results
+    const scene_options = zicrOptions(b, true, true);
+    const scene_step = b.step("test-scenes", "Run the cross-backend scene suite on this platform's backends");
+    if (sceneExecutable(b, target, optimize, scene_options)) |scenes_exe| {
+        const run = b.addRunArtifact(scenes_exe);
+        run.addPassthruArgs();
+        scene_step.dependOn(&run.step);
+    }
+    const windows_scene_target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .gnu });
+    if (sceneExecutable(b, windows_scene_target, optimize, scene_options)) |scenes_exe| {
+        b.step("check-scenes-windows", "Build the scene suite for Windows (D3D11, D3D12, Vulkan)").dependOn(&b.addInstallArtifact(scenes_exe, .{}).step);
+    }
+
     // ------------------------------------------------------------ GPU smoke tests
 
     inline for (.{
@@ -84,6 +99,19 @@ pub fn build(b: *std.Build) void {
     }
 }
 
+fn sceneExecutable(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, options: *std.Build.Step.Options) ?*std.Build.Step.Compile {
+    const module = toolModule(b, "tools/scenes/main.zig", target, optimize, options);
+    if (target.result.os.tag == .windows) module.link_libc = null;
+    const zicr = module.import_table.get("zicr").?;
+    const render = shaderModule(b, b, .{ .input = b.path("tools/scenes/scenes.glsl"), .zicr = zicr }) orelse return null;
+    const compute = shaderModule(b, b, .{ .input = b.path("tools/scenes/compute.glsl"), .compute = true, .zicr = zicr }) orelse return null;
+    const harness = b.createModule(.{ .root_source_file = b.path("tools/harness/harness.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "zicr", .module = zicr }} });
+    module.addImport("scene_shaders", render);
+    module.addImport("scene_compute_shaders", compute);
+    module.addImport("harness", harness);
+    return b.addExecutable(.{ .name = "zicr-scenes", .root_module = module });
+}
+
 fn zicrOptions(b: *std.Build, debug: ?bool, validate_non_fatal: bool) *std.Build.Step.Options {
     const options = b.addOptions();
     options.addOption(?bool, "debug", debug);
@@ -107,5 +135,52 @@ fn toolModule(b: *std.Build, root: []const u8, target: std.Build.ResolvedTarget,
         .optimize = optimize,
         .link_libc = true,
         .imports = &.{.{ .name = "zicr", .module = zicr }},
+    });
+}
+
+// ---------------------------------------------------------------- shaders
+
+pub const ShaderOptions = struct {
+    /// Annotated GLSL in sokol-shdc syntax.
+    input: std.Build.LazyPath,
+    /// Compiles for GL 4.3 and GLES 3.1 instead of GL 4.1 and GLES 3.0/WebGL2,
+    /// required for compute shaders and storage resources on GL.
+    compute: bool = false,
+    /// The zicr module the generated code imports.
+    zicr: *std.Build.Module,
+};
+
+/// Compiles a shader file for every backend and returns a module with one
+/// namespace per program, providing bind slots and `desc(backend)`.
+/// Returns null until the lazy shader compiler dependency has been fetched.
+pub fn addShaderModule(b: *std.Build, zicr_dep: *std.Build.Dependency, options: ShaderOptions) ?*std.Build.Module {
+    return shaderModule(b, zicr_dep.builder, options);
+}
+
+fn shaderModule(b: *std.Build, owner: *std.Build, options: ShaderOptions) ?*std.Build.Module {
+    const shdc_dep = owner.lazyDependency("sokol_tools_bin", .{}) orelse return null;
+    const host = owner.graph.host;
+    const sub_path = switch (host.result.os.tag) {
+        .linux => if (host.result.cpu.arch == .aarch64) "bin/linux_arm64/sokol-shdc" else "bin/linux/sokol-shdc",
+        .macos => if (host.result.cpu.arch == .aarch64) "bin/osx_arm64/sokol-shdc" else "bin/osx/sokol-shdc",
+        .windows => "bin/win32/sokol-shdc.exe",
+        else => @panic("sokol-shdc is not available for this host"),
+    };
+    const generator = owner.addExecutable(.{
+        .name = "zicr-shdc",
+        .root_module = owner.createModule(.{ .root_source_file = owner.path("tools/shdc/main.zig"), .target = host, .optimize = .safe }),
+    });
+    const run = b.addRunArtifact(generator);
+    run.addFileArg(shdc_dep.path(sub_path));
+    run.addFileArg(options.input);
+    const output = run.addOutputFileArg("shaders.zig");
+    _ = run.addOutputDirectoryArg("shdc");
+    run.addArg(if (options.compute)
+        "glsl430:glsl310es:hlsl5:metal_macos:metal_ios:metal_sim:wgsl:spirv_vk"
+    else
+        "glsl410:glsl300es:hlsl5:metal_macos:metal_ios:metal_sim:wgsl:spirv_vk");
+    return b.createModule(.{
+        .root_source_file = output,
+        .imports = &.{.{ .name = "zicr", .module = options.zicr }},
     });
 }
