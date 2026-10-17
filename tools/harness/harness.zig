@@ -25,6 +25,7 @@ pub const Variant = enum {
 
 pub const egl = if (builtin.os.tag == .linux) @import("egl.zig") else struct {};
 pub const d3d11 = if (builtin.os.tag == .windows) @import("d3d11.zig") else struct {};
+pub const d3d12 = if (builtin.os.tag == .windows) @import("d3d12.zig") else struct {};
 pub const wgpu = if (builtin.os.tag == .linux) @import("wgpu.zig") else struct {};
 pub const vulkan = if (builtin.os.tag == .linux) @import("vulkan.zig") else struct {};
 
@@ -35,6 +36,6 @@ pub fn contextFor(comptime variant: Variant) type {
         .wgpu => if (builtin.os.tag == .linux) wgpu.Context else void,
         .vulkan => if (builtin.os.tag == .linux) vulkan.Context else void,
         .d3d11 => if (builtin.os.tag == .windows) d3d11.Context else void,
-        else => void,
+        .d3d12 => if (builtin.os.tag == .windows) d3d12.Context else void,
     };
 }

@@ -347,5 +347,6 @@ pub const glQueryViewInfo = api.glQueryViewInfo;
 /// Native driver interoperation types; no Sokol C implementation is involved.
 pub const native = struct {
     pub const d3d11 = @import("backends/d3d11/sdk.zig");
+    pub const d3d12 = @import("backends/d3d12/sdk.zig");
     pub const WindowsLibrary = @import("platform/windows_library.zig").Library;
 };

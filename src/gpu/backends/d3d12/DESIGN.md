@@ -30,8 +30,9 @@ contract in `../CONTRACT.md` like the Vulkan, WebGPU and Metal backends.
   backend's staging copy path).
 - Staging buffers (`usage.staging_buffer`) keep their data in CPU memory and are
   copied through the upload ring, as in the D3D11 backend.
-- Texture copies use `GetCopyableFootprints`; footprints need 256-byte row pitch
-  and 512-byte offsets, so data is repacked into the upload ring.
+- Texture copies use placed footprints computed analytically (rows padded to 256
+  bytes, slices to 512 bytes, the layout the copies require) instead of
+  `GetCopyableFootprints`; data is repacked into the upload ring.
   `features.copy_buffer_to_image_relaxed_bytes_per_row` is false (as on WebGPU);
   a buffer source at an offset that isn't 512-aligned is first copied into a
   temporary buffer.
@@ -57,6 +58,7 @@ contract in `../CONTRACT.md` like the Vulkan, WebGPU and Metal backends.
   registers), each covering registers 0..max used. Shaders keep the parameter
   indices and register layout in their payload.
 - Serialized with `D3D12SerializeRootSignature` (version 1.0) from d3d12.dll.
+- The HLSL target defaults to `vs_5_0`, `ps_5_0`, `cs_5_0` (the shared `d3d11_target` field), since SM 4.x is not valid D3D12 input.
 
 ## Shaders and pipelines
 
