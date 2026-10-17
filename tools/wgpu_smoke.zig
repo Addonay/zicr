@@ -7,7 +7,7 @@
 //!
 //! Run with: WGPU_NATIVE_LIB=/path/to/libwgpu_native.so zig build test-wgpu
 const std = @import("std");
-const gfx = @import("sokol_gfx");
+const gfx = @import("zicr").gpu.raw;
 
 pub const ChainedStruct = extern struct {
     next: ?*const ChainedStruct = null,

@@ -5,7 +5,7 @@
 //!
 //! usage: sokol-gfx-diff-fuzz [--seed N] [--runs N] [--steps N]
 const std = @import("std");
-const gfx = @import("sokol_gfx");
+const gfx = @import("zicr").gpu.raw;
 const c = @import("sokol_ref");
 
 // ---------------------------------------------------------------- Zig to C conversion

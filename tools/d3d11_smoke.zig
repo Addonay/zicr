@@ -1,6 +1,6 @@
 //! Native Windows D3D11 smoke test; all rendering goes through sokol_gfx.
 const std = @import("std");
-const gfx = @import("sokol_gfx");
+const gfx = @import("zicr").gpu.raw;
 const sdk = gfx.native.d3d11;
 const Library = gfx.native.WindowsLibrary;
 

@@ -562,7 +562,7 @@ test "GL shader validation rejects missing names, padding mismatch and binding c
     const validation = @import("../../validation.zig");
     const defaults = @import("../../defaults.zig");
     const core = @import("../../core.zig");
-    const gfx = @import("../../root.zig");
+    const gfx = @import("../../internal.zig");
     try gfx.setup(std.testing.allocator, .dummy, .{});
     defer gfx.shutdown();
     // validation rules depend on the active backend

@@ -247,7 +247,7 @@ test "D3D11 validation separates stage register files and rejects shared SRV col
     if (!@import("../../config.zig").debug) return error.SkipZigTest;
     const validation = @import("../../validation.zig");
     const core = @import("../../core.zig");
-    const gfx = @import("../../root.zig");
+    const gfx = @import("../../internal.zig");
     try gfx.setup(std.testing.allocator, .dummy, .{});
     defer gfx.shutdown();
     // validation rules depend on the active backend
@@ -269,7 +269,7 @@ test "D3D11 validation separates stage register files and rejects shared SRV col
 }
 
 test "public D3D11 pipeline validation uses owned shader semantic names" {
-    const gfx = @import("../../root.zig");
+    const gfx = @import("../../internal.zig");
     var mock: Mock = undefined;
     mock.init();
     try gfx.setup(std.testing.allocator, .d3d11, .{ .environment = .{ .d3d11 = .{ .device = mock.devicePointer(), .device_context = mock.contextPointer() } } });

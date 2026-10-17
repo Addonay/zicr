@@ -1,6 +1,6 @@
 //! Forces semantic analysis of the Metal backend for Apple targets.
 const std = @import("std");
-const gfx = @import("sokol_gfx");
+const gfx = @import("zicr").gpu.raw;
 
 /// The default std panic handler does not build for iOS in Zig 0.17.
 pub const panic = std.debug.no_panic;

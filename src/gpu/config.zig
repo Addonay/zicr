@@ -1,6 +1,6 @@
 //! Compile-time configuration, the equivalent of the SOKOL_* defines.
 const builtin = @import("builtin");
-const options = @import("sokol_gfx_options");
+const options = @import("zicr_options");
 
 /// SOKOL_DEBUG: validation layer, log message strings and debug labels.
 pub const debug = options.debug orelse (builtin.mode == .debug or builtin.mode == .safe);

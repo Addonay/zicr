@@ -7,7 +7,7 @@
 //! The structs below are the Vulkan ABI as generated from vulkan_core.h; only the
 //! handful of entry points this test needs are declared.
 const std = @import("std");
-const gfx = @import("sokol_gfx");
+const gfx = @import("zicr").gpu.raw;
 
 const Instance = ?*anyopaque;
 const PhysicalDevice = ?*anyopaque;

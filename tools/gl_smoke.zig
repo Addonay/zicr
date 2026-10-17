@@ -1,7 +1,7 @@
 //! Native offscreen GL/GLES verification. Uses EGL through runtime-loaded
 //! function pointers; the library itself has no C imports or C compilation.
 const std = @import("std");
-const gfx = @import("sokol_gfx");
+const gfx = @import("zicr").gpu.raw;
 
 const Egl = struct {
     library: std.DynLib,

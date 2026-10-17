@@ -2,7 +2,7 @@
 //! (tests/functional/sokol_gfx_test.c), the equivalents of its test_logger,
 //! setup() and create_* helpers.
 const std = @import("std");
-pub const gfx = @import("root.zig");
+pub const gfx = @import("internal.zig");
 pub const core = @import("core.zig");
 
 pub const max_log_items = 32;

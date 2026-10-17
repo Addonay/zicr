@@ -1,5 +1,5 @@
 const std = @import("std");
-const gfx = @import("root.zig");
+const gfx = @import("internal.zig");
 const defaults = @import("defaults.zig");
 const formats = @import("formats.zig");
 const Pool = @import("pool.zig").Pool;
