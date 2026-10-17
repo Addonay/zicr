@@ -1759,6 +1759,16 @@ pub const Backend = struct {
         begin(cmd_buf, &label);
     }
 
+    /// Readback (zicr extension): waits for committed GPU work, copies buffer bytes into `out`.
+    pub fn readBuffer(self: *Backend, buf: *core.Buffer, offset: usize, out: []u8) bool {
+        return readbackBuffer(self, buf, offset, out);
+    }
+
+    /// Readback (zicr extension): waits for committed GPU work, copies an image region into `out`.
+    pub fn readImage(self: *Backend, img: *core.Image, region: *const core.ReadRegion, out: []u8) bool {
+        return readbackImage(self, img, region, out);
+    }
+
     pub fn popDebugGroup(self: *Backend) void {
         if (!config.debug) return;
         const cmd_buf = self.frame.cmd_buf orelse return;
@@ -1787,4 +1797,154 @@ fn mipRegion(dst: anytype, size: anytype) memory.MipRegion {
         .height = size.height,
         .num_slices = size.num_slices,
     };
+}
+
+// ---------------------------------------------------------------- readback (zicr extension)
+
+/// A host-visible temporary buffer that receives a copy of GPU data.
+const ReadbackStaging = struct {
+    buf: u64,
+    mem: u64,
+};
+
+fn createReadbackStaging(self: *Backend, size: u64) ?ReadbackStaging {
+    const info: sdk.BufferCreateInfo = .{
+        .sType = sdk.STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+        .pNext = null,
+        .flags = 0,
+        .size = size,
+        .usage = sdk.BUFFER_USAGE_TRANSFER_DST_BIT,
+        .sharingMode = sdk.SHARING_MODE_EXCLUSIVE,
+        .queueFamilyIndexCount = 0,
+        .pQueueFamilyIndices = null,
+    };
+    var buf: u64 = 0;
+    if (self.fns.device.vkCreateBuffer(self.dev, &info, null, &buf) != sdk.SUCCESS) return null;
+    var reqs: sdk.MemoryRequirements = undefined;
+    self.fns.device.vkGetBufferMemoryRequirements(self.dev, buf, &reqs);
+    const mem = memory.allocDeviceMemory(self, .staging_copy, &reqs);
+    if (mem == 0) {
+        self.fns.device.vkDestroyBuffer(self.dev, buf, null);
+        return null;
+    }
+    if (self.fns.device.vkBindBufferMemory(self.dev, buf, mem, 0) != sdk.SUCCESS) {
+        self.fns.device.vkDestroyBuffer(self.dev, buf, null);
+        memory.freeDeviceMemory(self, mem);
+        return null;
+    }
+    return .{ .buf = buf, .mem = mem };
+}
+
+fn destroyReadbackStaging(self: *Backend, staging: ReadbackStaging) void {
+    self.fns.device.vkDestroyBuffer(self.dev, staging.buf, null);
+    memory.freeDeviceMemory(self, staging.mem);
+}
+
+/// Maps the staging memory; the caller unmaps it after copying out.
+fn mapReadbackStaging(self: *Backend, staging: ReadbackStaging, size: u64) ?[*]u8 {
+    var ptr: ?*anyopaque = null;
+    if (self.fns.device.vkMapMemory(self.dev, staging.mem, 0, size, 0, &ptr) != sdk.SUCCESS) return null;
+    const p: [*]u8 = @ptrCast(ptr orelse return null);
+    return p;
+}
+
+/// Copies `out.len` bytes starting at `offset`. Waits for all submitted work (memory.stagingCopyEnd).
+fn readbackBuffer(self: *Backend, buf: *core.Buffer, offset: usize, out: []u8) bool {
+    const staging = createReadbackStaging(self, out.len) orelse return false;
+    defer destroyReadbackStaging(self, staging);
+    const d = &self.fns.device;
+    const cmd = memory.stagingCopyBegin(self);
+    const old_access = buf.native.vulkan.cur_access;
+    barrier.bufferBarrier(d, cmd, buf, barrier.copy_src);
+    const region: sdk.BufferCopy = .{ .srcOffset = offset, .dstOffset = 0, .size = out.len };
+    d.vkCmdCopyBuffer(cmd, buf.native.vulkan.buf, staging.buf, 1, @ptrCast(&region));
+    core.statsInc("vk.num_cmd_copy_buffer");
+    barrier.bufferBarrier(d, cmd, buf, old_access);
+    memory.stagingCopyEnd(self, cmd);
+    const src = mapReadbackStaging(self, staging, out.len) orelse return false;
+    @memcpy(out, src[0..out.len]);
+    self.fns.device.vkUnmapMemory(self.dev, staging.mem);
+    return true;
+}
+
+/// Layout transition of a whole image around a copy. The tracked access (`cur_access`) is left
+/// unchanged; only the Vulkan layout is moved and then moved back. Uses conservative sync.
+fn readbackTransition(self: *Backend, image: u64, new_layout: i32, cmd: sdk.CommandBuffer, src_stage: u64, src_access: u64, dst_stage: u64, dst_access: u64, old_layout: i32) void {
+    const bar: sdk.ImageMemoryBarrier2 = .{
+        .sType = sdk.STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+        .pNext = null,
+        .srcStageMask = src_stage,
+        .srcAccessMask = src_access,
+        .dstStageMask = dst_stage,
+        .dstAccessMask = dst_access,
+        .oldLayout = old_layout,
+        .newLayout = new_layout,
+        .srcQueueFamilyIndex = sdk.QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = sdk.QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .subresourceRange = .{ .aspectMask = sdk.IMAGE_ASPECT_COLOR_BIT, .baseMipLevel = 0, .levelCount = sdk.REMAINING_MIP_LEVELS, .baseArrayLayer = 0, .layerCount = sdk.REMAINING_ARRAY_LAYERS },
+    };
+    const dep: sdk.DependencyInfo = .{
+        .sType = sdk.STRUCTURE_TYPE_DEPENDENCY_INFO,
+        .pNext = null,
+        .dependencyFlags = 0,
+        .memoryBarrierCount = 0,
+        .pMemoryBarriers = null,
+        .bufferMemoryBarrierCount = 0,
+        .pBufferMemoryBarriers = null,
+        .imageMemoryBarrierCount = 1,
+        .pImageMemoryBarriers = &bar,
+    };
+    self.fns.device.vkCmdPipelineBarrier2(cmd, &dep);
+    core.statsInc("vk.num_cmd_pipeline_barrier");
+}
+
+/// Copies one mip level region of an image into `out`, honouring bytes_per_row and bytes_per_slice.
+/// The GPU copy packs the region tightly into a staging buffer; the CPU copy then applies the pitches.
+fn readbackImage(self: *Backend, img: *core.Image, region: *const core.ReadRegion, out: []u8) bool {
+    const payload = &img.native.vulkan;
+    const is3d = img.cmn.type == .@"3d";
+    const px: usize = @intCast(formats.pixelSize(img.cmn.pixel_format));
+    const row_bytes: usize = @as(usize, region.width) * px;
+    const rows: usize = region.height;
+    const slices: usize = region.num_slices;
+    const total = row_bytes * rows * slices;
+    const staging = createReadbackStaging(self, total) orelse return false;
+    defer destroyReadbackStaging(self, staging);
+
+    const d = &self.fns.device;
+    const cmd = memory.stagingCopyBegin(self);
+    const old_layout = barrier.imageLayout(payload.cur_access);
+    // conservative synchronization: everything before, transfer read, everything after
+    const all_stages = sdk.PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    const all_access = sdk.ACCESS_2_MEMORY_READ_BIT | sdk.ACCESS_2_MEMORY_WRITE_BIT;
+    readbackTransition(self, payload.img, sdk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, cmd, all_stages, all_access, sdk.PIPELINE_STAGE_2_COPY_BIT, sdk.ACCESS_2_TRANSFER_READ_BIT, old_layout);
+    const copy: sdk.BufferImageCopy = .{
+        .bufferOffset = 0,
+        .bufferRowLength = 0, // tightly packed
+        .bufferImageHeight = 0,
+        .imageSubresource = .{
+            .aspectMask = sdk.IMAGE_ASPECT_COLOR_BIT,
+            .mipLevel = region.mip_level,
+            .baseArrayLayer = if (is3d) 0 else region.slice,
+            .layerCount = if (is3d) 1 else region.num_slices,
+        },
+        .imageOffset = .{ .x = @intCast(region.x), .y = @intCast(region.y), .z = if (is3d) @intCast(region.slice) else 0 },
+        .imageExtent = .{ .width = region.width, .height = region.height, .depth = if (is3d) region.num_slices else 1 },
+    };
+    d.vkCmdCopyImageToBuffer(cmd, payload.img, sdk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging.buf, 1, @ptrCast(&copy));
+    core.statsInc("vk.num_cmd_copy_buffer_to_image");
+    readbackTransition(self, payload.img, old_layout, cmd, sdk.PIPELINE_STAGE_2_COPY_BIT, sdk.ACCESS_2_TRANSFER_READ_BIT, all_stages, all_access, sdk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    memory.stagingCopyEnd(self, cmd);
+
+    const src = mapReadbackStaging(self, staging, total) orelse return false;
+    defer self.fns.device.vkUnmapMemory(self.dev, staging.mem);
+    for (0..slices) |s| {
+        for (0..rows) |r| {
+            const from = (s * rows + r) * row_bytes;
+            const to = s * region.bytes_per_slice + r * region.bytes_per_row;
+            @memcpy(out[to..][0..row_bytes], src[from..][0..row_bytes]);
+        }
+    }
+    return true;
 }

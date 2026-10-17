@@ -188,3 +188,28 @@ test "commit listeners receive their user data" {
     try std.testing.expectEqual(@as(u32, 2), n);
     try std.testing.expect(dev.removeCommitListener(.{ .func = Counter.bump, .user_data = &n }));
 }
+
+test "readback validates the request and fills the destination" {
+    var dev = try testDevice(.{ .backend = .dummy });
+    defer dev.deinit();
+    const data: [16]u8 = @splat(7);
+    const readable = try dev.createBuffer(.{ .usage = .{ .copy_src = true }, .data = &data });
+    var out: [8]u8 = @splat(1);
+    try dev.readBuffer(readable, 4, &out);
+    // the dummy backend has no GPU memory and reads zeros
+    try std.testing.expectEqualSlices(u8, &(@as([8]u8, @splat(0))), &out);
+    const plain = try dev.createBuffer(.{ .data = &data });
+    try std.testing.expectError(error.ReadFailed, dev.readBuffer(plain, 0, &out));
+    try std.testing.expect(Diagnostics.contains(.validate_readbuffer_usage));
+    try std.testing.expectError(error.ReadFailed, dev.readBuffer(readable, 12, &out));
+    try std.testing.expect(Diagnostics.contains(.validate_readbuffer_range));
+
+    const rt = try dev.createImage(.{ .width = 8, .height = 4, .usage = .{ .color_attachment = true, .copy_src = true } });
+    var pixels: [8 * 4 * 4]u8 = undefined;
+    try dev.readImage(rt, .{}, &pixels, .{});
+    try std.testing.expectError(error.ReadFailed, dev.readImage(rt, .{ .x = 4, .width = 8 }, &pixels, .{}));
+    try std.testing.expect(Diagnostics.contains(.validate_readimage_region));
+    var small: [4]u8 = undefined;
+    try std.testing.expectError(error.ReadFailed, dev.readImage(rt, .{}, &small, .{}));
+    try std.testing.expect(Diagnostics.contains(.validate_readimage_dst_size));
+}

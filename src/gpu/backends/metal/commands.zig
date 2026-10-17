@@ -844,3 +844,122 @@ pub fn popDebugGroup(self: *Backend) void {
         sdk.msg(void, self.compute_cmd_encoder, "popDebugGroup", .{});
     }
 }
+
+/// A command buffer with one blit encoder, used for readback.
+const Readback = struct { cmd: sdk.Id, blit: sdk.Id };
+
+/// Starts a readback on its own command buffer. Work committed earlier on the queue
+/// runs before it, so waiting for this buffer also waits for that work.
+fn beginReadback(self: *const Backend) ?Readback {
+    const cmd = sdk.retain(sdk.msg(sdk.Id, self.cmd_queue, "commandBuffer", .{}));
+    if (cmd == null) return null;
+    const blit = sdk.retain(sdk.msg(sdk.Id, cmd, "blitCommandEncoder", .{}));
+    if (blit == null) {
+        sdk.release(cmd);
+        return null;
+    }
+    return .{ .cmd = cmd, .blit = blit };
+}
+
+/// Ends the readback encoder, runs its command buffer and waits for it. Returns false if
+/// the GPU work did not complete.
+fn finishReadback(rb: Readback) bool {
+    const mtl_status_completed: sdk.Uint = 4;
+    sdk.msg(void, rb.blit, "endEncoding", .{});
+    sdk.msg(void, rb.cmd, "commit", .{});
+    sdk.msg(void, rb.cmd, "waitUntilCompleted", .{});
+    const status = sdk.msg(sdk.Uint, rb.cmd, "status", .{});
+    sdk.release(rb.blit);
+    sdk.release(rb.cmd);
+    return status == mtl_status_completed;
+}
+
+/// Readback (zicr extension): waits for committed GPU work, copies buffer bytes into `out`.
+/// Outside passes only. Bytes are copied through a shared temporary buffer.
+pub fn readBuffer(self: *Backend, buf: *core.Buffer, offset: usize, out: []u8) bool {
+    if (out.len == 0) return false;
+    const res = switch (buf.native) {
+        .metal => |*m| m,
+        else => return false,
+    };
+    const src = self.idpool.id(res.buf[@intCast(buf.cmn.active_slot)]);
+    if (src == null) return false;
+    // CPU writes to a managed buffer are reported to the GPU before the copy
+    commitBufferWriteRange(self, buf);
+
+    const temp = sdk.msg(sdk.Id, self.mtl_device, "newBufferWithLength:options:", .{ uint(out.len), sdk.resource_storage_shared });
+    if (temp == null) return false;
+    defer sdk.release(temp);
+    const rb = beginReadback(self) orelse return false;
+    sdk.msg(void, rb.blit, "copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:", .{ src, uint(offset), temp, uint(0), uint(out.len) });
+    if (!finishReadback(rb)) return false;
+
+    const contents = sdk.msg(?*anyopaque, temp, "contents", .{}) orelse return false;
+    const bytes: [*]const u8 = @ptrCast(contents);
+    @memcpy(out, bytes[0..out.len]);
+    return true;
+}
+
+/// Readback (zicr extension): waits for committed GPU work, copies an image region into `out`.
+/// Outside passes only. The output uses the region's bytes_per_row and bytes_per_slice.
+pub fn readImage(self: *Backend, img: *core.Image, region: *const core.ReadRegion, out: []u8) bool {
+    const res = switch (img.native) {
+        .metal => |*m| m,
+        else => return false,
+    };
+    const tex = self.idpool.id(res.tex[@intCast(img.cmn.active_slot)]);
+    if (tex == null or region.width == 0 or region.height == 0 or region.num_slices == 0) return false;
+
+    // the bytes the copy writes: every slice up to the last row of the last slice
+    const row_bytes: usize = @intCast(core.formats.rowPitch(img.cmn.pixel_format, @intCast(region.width), 1));
+    const required = @as(usize, region.num_slices - 1) * region.bytes_per_slice +
+        @as(usize, region.height - 1) * region.bytes_per_row + row_bytes;
+    if (out.len < required or region.bytes_per_row < row_bytes) return false;
+
+    const temp = sdk.msg(sdk.Id, self.mtl_device, "newBufferWithLength:options:", .{ uint(required), sdk.resource_storage_shared });
+    if (temp == null) return false;
+    defer sdk.release(temp);
+    const rb = beginReadback(self) orelse return false;
+
+    const mip: sdk.Uint = @intCast(region.mip_level);
+    const bytes_per_row = uint(region.bytes_per_row);
+    const size_2d: sdk.Size = .{ .width = uint(region.width), .height = uint(region.height), .depth = 1 };
+    if (img.cmn.type == .@"3d") {
+        // one copy covers all slices, they are the depth of the region
+        const origin: sdk.Origin = .{ .x = uint(region.x), .y = uint(region.y), .z = uint(region.slice) };
+        const size: sdk.Size = .{ .width = uint(region.width), .height = uint(region.height), .depth = uint(region.num_slices) };
+        sdk.msg(void, rb.blit, "copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toBuffer:destinationOffset:destinationBytesPerRow:destinationBytesPerImage:", .{
+            tex,
+            uint(0),
+            mip,
+            origin,
+            size,
+            temp,
+            uint(0),
+            bytes_per_row,
+            uint(region.bytes_per_slice),
+        });
+    } else {
+        // 2D, array and cube textures are copied slice by slice
+        const origin: sdk.Origin = .{ .x = uint(region.x), .y = uint(region.y), .z = 0 };
+        for (0..region.num_slices) |i| {
+            sdk.msg(void, rb.blit, "copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toBuffer:destinationOffset:destinationBytesPerRow:destinationBytesPerImage:", .{
+                tex,
+                uint(region.slice + i),
+                mip,
+                origin,
+                size_2d,
+                temp,
+                uint(i * region.bytes_per_slice),
+                bytes_per_row,
+                uint(0),
+            });
+        }
+    }
+    if (!finishReadback(rb)) return false;
+
+    const contents = sdk.msg(?*anyopaque, temp, "contents", .{}) orelse return false;
+    const bytes: [*]const u8 = @ptrCast(contents);
+    @memcpy(out[0..required], bytes[0..required]);
+    return true;
+}

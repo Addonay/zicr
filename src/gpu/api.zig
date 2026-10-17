@@ -1045,6 +1045,79 @@ pub fn copyBufferToImage(desc: t.CopyBufferToImageDesc) void {
     core.trace("copy_buffer_to_image", .{&desc});
 }
 
+// ---------------------------------------------------------------- readback (zicr extension)
+
+/// Waits for all committed GPU work and copies `out.len` bytes of a buffer,
+/// starting at `offset`, into `out`. Must be called outside of passes; the
+/// buffer needs `usage.copy_src`. Returns false if the read was rejected or failed.
+pub fn readBuffer(buf_id: t.Buffer, offset: usize, out: []u8) bool {
+    const buf = core.lookupBuffer(buf_id.id) orelse {
+        core.logError(.read_buffer_alive);
+        return false;
+    };
+    if (buf.slot.state != .valid) {
+        core.logError(.read_buffer_valid);
+        return false;
+    }
+    if (!validation.readBuffer(buf, offset, out.len)) return false;
+    if (backend.readBuffer(buf, offset, out)) return true;
+    core.logError(.read_buffer_failed);
+    return false;
+}
+
+pub const ReadImageDesc = struct {
+    image: t.Image = .{},
+    mip_level: u32 = 0,
+    x: u32 = 0,
+    y: u32 = 0,
+    slice: u32 = 0,
+    /// 0: to the end of the mip level.
+    width: u32 = 0,
+    height: u32 = 0,
+    num_slices: u32 = 0,
+    /// 0: tightly packed.
+    bytes_per_row: usize = 0,
+    bytes_per_slice: usize = 0,
+};
+
+/// Waits for all committed GPU work and copies a region of an image into
+/// `out`. Must be called outside of passes; the image needs `usage.copy_src`.
+pub fn readImage(desc: ReadImageDesc, out: []u8) bool {
+    const img = core.lookupImage(desc.image.id) orelse {
+        core.logError(.read_image_alive);
+        return false;
+    };
+    if (img.slot.state != .valid) {
+        core.logError(.read_image_valid);
+        return false;
+    }
+    const cmn = &img.cmn;
+    var region: core.ReadRegion = .{
+        .mip_level = desc.mip_level,
+        .x = desc.x,
+        .y = desc.y,
+        .slice = desc.slice,
+        .width = desc.width,
+        .height = desc.height,
+        .num_slices = desc.num_slices,
+        .bytes_per_row = desc.bytes_per_row,
+        .bytes_per_slice = desc.bytes_per_slice,
+    };
+    if (desc.mip_level < cmn.num_mipmaps) {
+        const mip: i32 = @intCast(desc.mip_level);
+        const slices = if (cmn.type == .@"3d") core.miplevelDim(cmn.num_slices, mip) else cmn.num_slices;
+        if (region.width == 0) region.width = @intCast(@max(core.miplevelDim(cmn.width, mip) - @as(i32, @intCast(@min(desc.x, std.math.maxInt(i32)))), 0));
+        if (region.height == 0) region.height = @intCast(@max(core.miplevelDim(cmn.height, mip) - @as(i32, @intCast(@min(desc.y, std.math.maxInt(i32)))), 0));
+        if (region.num_slices == 0) region.num_slices = @intCast(@max(slices - @as(i32, @intCast(@min(desc.slice, std.math.maxInt(i32)))), 0));
+        if (region.bytes_per_row == 0 and region.width > 0) region.bytes_per_row = @intCast(formats.rowPitch(cmn.pixel_format, @intCast(region.width), 1));
+        if (region.bytes_per_slice == 0) region.bytes_per_slice = region.bytes_per_row * region.height;
+    }
+    if (!validation.readImage(img, &region, out.len)) return false;
+    if (backend.readImage(img, &region, out)) return true;
+    core.logError(.read_image_failed);
+    return false;
+}
+
 pub fn pushDebugGroup(name: [*:0]const u8) void {
     _ = state();
     backend.pushDebugGroup(name);

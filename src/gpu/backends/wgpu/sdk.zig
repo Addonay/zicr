@@ -47,6 +47,12 @@ pub const ColorWriteMask = struct {
     pub const all: u64 = 0xf;
 };
 
+pub const MapMode = struct {
+    pub const none: u64 = 0x0;
+    pub const read: u64 = 0x1;
+    pub const write: u64 = 0x2;
+};
+
 pub const ShaderStage = struct {
     pub const none: u64 = 0x0;
     pub const vertex: u64 = 0x1;
@@ -615,6 +621,10 @@ pub const FragmentState = extern struct {
     targets: ?*const ColorTargetState = null,
 };
 
+pub const Future = extern struct {
+    id: u64 = 0,
+};
+
 pub const Limits = extern struct {
     next_in_chain: ?*ChainedStruct = null,
     max_texture_dimension1_d: u32 = 0,
@@ -857,11 +867,26 @@ pub const VertexState = extern struct {
     buffers: ?*const VertexBufferLayout = null,
 };
 
+// BufferMapCallbackInfo has a callback field, so it is written by hand.
+pub const BufferMapCallback = *const fn (status: u32, message: StringView, userdata1: ?*anyopaque, userdata2: ?*anyopaque) callconv(.c) void;
+pub const BufferMapCallbackInfo = extern struct {
+    next_in_chain: ?*const ChainedStruct = null,
+    mode: u32 = 0,
+    callback: ?BufferMapCallback = null,
+    userdata1: ?*anyopaque = null,
+    userdata2: ?*anyopaque = null,
+};
+
+/// wgpu-native extension (wgpu.h), resolved separately: it may be absent.
+pub const DevicePollFn = *const fn (device: ?Device, wait: u32, submission: ?*const anyopaque) callconv(.c) u32;
+
 pub const Procs = struct {
     wgpuBindGroupLayoutRelease: *const fn (?BindGroupLayout) callconv(.c) void,
     wgpuBindGroupRelease: *const fn (?BindGroup) callconv(.c) void,
     wgpuBufferAddRef: *const fn (?Buffer) callconv(.c) void,
+    wgpuBufferGetConstMappedRange: *const fn (?Buffer, usize, usize) callconv(.c) ?*anyopaque,
     wgpuBufferGetMappedRange: *const fn (?Buffer, usize, usize) callconv(.c) ?*anyopaque,
+    wgpuBufferMapAsync: *const fn (?Buffer, u64, usize, usize, BufferMapCallbackInfo) callconv(.c) Future,
     wgpuBufferRelease: *const fn (?Buffer) callconv(.c) void,
     wgpuBufferUnmap: *const fn (?Buffer) callconv(.c) void,
     wgpuCommandBufferRelease: *const fn (?CommandBuffer) callconv(.c) void,
@@ -869,6 +894,7 @@ pub const Procs = struct {
     wgpuCommandEncoderBeginRenderPass: *const fn (?CommandEncoder, ?*const RenderPassDescriptor) callconv(.c) ?RenderPassEncoder,
     wgpuCommandEncoderCopyBufferToBuffer: *const fn (?CommandEncoder, ?Buffer, u64, ?Buffer, u64, u64) callconv(.c) void,
     wgpuCommandEncoderCopyBufferToTexture: *const fn (?CommandEncoder, ?*const TexelCopyBufferInfo, ?*const TexelCopyTextureInfo, ?*const Extent3D) callconv(.c) void,
+    wgpuCommandEncoderCopyTextureToBuffer: *const fn (?CommandEncoder, ?*const TexelCopyTextureInfo, ?*const TexelCopyBufferInfo, ?*const Extent3D) callconv(.c) void,
     wgpuCommandEncoderFinish: *const fn (?CommandEncoder, ?*const CommandBufferDescriptor) callconv(.c) ?CommandBuffer,
     wgpuCommandEncoderRelease: *const fn (?CommandEncoder) callconv(.c) void,
     wgpuComputePassEncoderDispatchWorkgroups: *const fn (?ComputePassEncoder, u32, u32, u32) callconv(.c) void,

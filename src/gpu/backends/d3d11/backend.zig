@@ -8,6 +8,7 @@ const r = @import("resources.zig");
 const t = @import("../../types.zig");
 const e = @import("../../enums.zig");
 const formats = @import("../../formats.zig");
+const core = @import("../../core.zig");
 const Compiler = @import("compiler.zig").Compiler;
 
 const debug_name: sdk.Guid = .{ .data1 = 0x429b8c22, .data2 = 0x9188, .data3 = 0x4b0c, .data4 = .{ 0x87, 0x42, 0xac, 0xb0, 0xbf, 0x85, 0xc2, 0x00 } };
@@ -612,6 +613,72 @@ pub const Backend = struct {
         // Resolve-attachment views only retain their common image reference.
         return true;
     }
+    /// Readback (zicr extension): copies into a CPU-readable staging resource and
+    /// maps it, which waits for the copy and all earlier work.
+    pub fn readBuffer(self: *Backend, buffer: *r.Buffer, desc: t.BufferDesc, offset: usize, out: []u8) bool {
+        _ = desc;
+        if (buffer.staging) |data| {
+            @memcpy(out, data[offset..][0..out.len]);
+            return true;
+        }
+        const staging_desc: sdk.BufferDesc = .{ .byte_width = @intCast(out.len), .usage = c.usage_staging, .cpu_access_flags = c.cpu_access_read };
+        var staging: ?*sdk.Object = null;
+        if (sdk.createBuffer(self.device, @ptrCast(&staging_desc), null, &staging) < 0) return false;
+        defer sdk.release(staging);
+        const box: sdk.Box = .{ .left = @intCast(offset), .right = @intCast(offset + out.len), .bottom = 1, .back = 1 };
+        sdk.copySubresourceRegion(self.context, staging, 0, 0, 0, 0, buffer.object, 0, @ptrCast(&box));
+        var mapped: sdk.MappedSubresource = .{};
+        if (sdk.map(self.context, staging, 0, c.map_read, 0, @ptrCast(&mapped)) < 0) return false;
+        defer sdk.unmap(self.context, staging, 0);
+        const src: [*]const u8 = @ptrCast(mapped.data orelse return false);
+        @memcpy(out, src[0..out.len]);
+        return true;
+    }
+
+    pub fn readImage(self: *Backend, image: *r.Image, desc: t.ImageDesc, region: *const core.ReadRegion, out: []u8) bool {
+        const volume = desc.type == .@"3d";
+        const layers: u32 = if (volume) 1 else region.num_slices;
+        var staging: ?*sdk.Object = null;
+        if (volume) {
+            const tex_desc: sdk.Texture3DDesc = .{ .width = region.width, .height = region.height, .depth = region.num_slices, .mip_levels = 1, .format = image.format, .usage = c.usage_staging, .cpu_access_flags = c.cpu_access_read };
+            if (sdk.createTexture3D(self.device, @ptrCast(&tex_desc), null, &staging) < 0) return false;
+        } else {
+            const tex_desc: sdk.Texture2DDesc = .{ .width = region.width, .height = region.height, .mip_levels = 1, .array_size = layers, .format = image.format, .sample_desc = .{ .count = 1 }, .usage = c.usage_staging, .cpu_access_flags = c.cpu_access_read };
+            if (sdk.createTexture2D(self.device, @ptrCast(&tex_desc), null, &staging) < 0) return false;
+        }
+        defer sdk.release(staging);
+        const mip_count: u32 = @intCast(desc.num_mipmaps);
+        for (0..layers) |i| {
+            const layer: u32 = @intCast(i);
+            const box: sdk.Box = .{
+                .left = region.x,
+                .top = region.y,
+                .front = if (volume) region.slice else 0,
+                .right = region.x + region.width,
+                .bottom = region.y + region.height,
+                .back = if (volume) region.slice + region.num_slices else 1,
+            };
+            const src_sub = convert.subresource(region.mip_level, if (volume) 0 else region.slice + layer, mip_count);
+            sdk.copySubresourceRegion(self.context, staging, layer, 0, 0, 0, image.resource, src_sub, @ptrCast(&box));
+        }
+        const row_bytes: usize = @intCast(formats.rowPitch(desc.pixel_format, @intCast(region.width), 1));
+        for (0..layers) |i| {
+            var mapped: sdk.MappedSubresource = .{};
+            if (sdk.map(self.context, staging, @intCast(i), c.map_read, 0, @ptrCast(&mapped)) < 0) return false;
+            defer sdk.unmap(self.context, staging, @intCast(i));
+            const src: [*]const u8 = @ptrCast(mapped.data orelse return false);
+            const depth: usize = if (volume) region.num_slices else 1;
+            for (0..depth) |z| {
+                const slice_index = if (volume) z else i;
+                for (0..region.height) |y| {
+                    const src_row = src[z * mapped.depth_pitch + y * mapped.row_pitch ..][0..row_bytes];
+                    @memcpy(out[slice_index * region.bytes_per_slice + y * region.bytes_per_row ..][0..row_bytes], src_row);
+                }
+            }
+        }
+        return true;
+    }
+
     pub fn discardView(_: *Backend, view: *r.View) void {
         sdk.release(view.srv);
         sdk.release(view.uav);

@@ -216,6 +216,20 @@ pub const BindingsPtrs = struct {
     smps: [12]?*Sampler = @splat(null),
 };
 
+/// A resolved image region for readback: one mip level, `bytes_per_row` and
+/// `bytes_per_slice` apart in the destination (zicr extension).
+pub const ReadRegion = struct {
+    mip_level: u32,
+    x: u32,
+    y: u32,
+    slice: u32,
+    width: u32,
+    height: u32,
+    num_slices: u32,
+    bytes_per_row: usize,
+    bytes_per_slice: usize,
+};
+
 // ---------------------------------------------------------------- state
 
 pub const Pools = struct {

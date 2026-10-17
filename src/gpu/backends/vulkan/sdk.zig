@@ -1334,6 +1334,7 @@ pub const DeviceFns = struct {
     vkQueueWaitIdle: *const fn (Queue) callconv(.c) i32 = undefined,
     vkCmdPipelineBarrier2: *const fn (CommandBuffer, *const DependencyInfo) callconv(.c) void = undefined,
     vkCmdCopyBuffer: *const fn (CommandBuffer, Buffer, Buffer, u32, [*]const BufferCopy) callconv(.c) void = undefined,
+    vkCmdCopyImageToBuffer: *const fn (CommandBuffer, Image, i32, Buffer, u32, [*]const BufferImageCopy) callconv(.c) void = undefined,
     vkCmdCopyBufferToImage2: *const fn (CommandBuffer, *const CopyBufferToImageInfo2) callconv(.c) void = undefined,
     vkCmdBeginRendering: *const fn (CommandBuffer, *const RenderingInfo) callconv(.c) void = undefined,
     vkCmdEndRendering: *const fn (CommandBuffer) callconv(.c) void = undefined,

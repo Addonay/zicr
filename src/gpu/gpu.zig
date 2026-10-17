@@ -580,6 +580,38 @@ pub const Device = struct {
         }});
     }
 
+    // ------------------------------------------------------------ readback
+
+    /// Waits for all committed GPU work, then copies `out.len` bytes of a buffer
+    /// starting at `offset`. Call outside of passes, typically after `commit`;
+    /// the buffer needs `usage.copy_src`.
+    pub fn readBuffer(self: *Device, buffer: Buffer, offset: usize, out: []u8) ReadError!void {
+        _ = self;
+        if (!readChecked(internal.readBuffer, .{ t.Buffer{ .id = id(buffer) }, offset, out })) return error.ReadFailed;
+    }
+
+    /// Waits for all committed GPU work, then copies a region of an image into
+    /// `out`, in the row order of the image's storage (on GL, rendered images
+    /// have their first row at the bottom, see `Features.origin_top_left`).
+    /// The image needs `usage.copy_src`; compressed, depth and multisampled
+    /// images can't be read.
+    pub fn readImage(self: *Device, image: Image, region: ImageRegion, out: []u8, layout: DataLayout) ReadError!void {
+        _ = self;
+        const desc: internal.ReadImageDesc = .{
+            .image = .{ .id = id(image) },
+            .mip_level = region.mip_level,
+            .x = region.x,
+            .y = region.y,
+            .slice = region.slice,
+            .width = region.width orelse 0,
+            .height = region.height orelse 0,
+            .num_slices = region.slices orelse 0,
+            .bytes_per_row = layout.bytes_per_row orelse 0,
+            .bytes_per_slice = layout.bytes_per_slice orelse 0,
+        };
+        if (!readChecked(internal.readImage, .{ desc, out })) return error.ReadFailed;
+    }
+
     // ------------------------------------------------------------ passes and frames
 
     pub fn beginPass(self: *Device, desc: PassDesc) Pass {
@@ -650,6 +682,19 @@ fn create(comptime H: type, comptime make: anytype, desc: anytype) CreateError!H
         else => unreachable,
     }
     return if (invalid) error.InvalidDescriptor else error.CreationFailed;
+}
+
+pub const ReadError = error{
+    /// The read was rejected (see diagnostics) or the backend failed to read.
+    ReadFailed,
+};
+
+/// Like `validated`, but a rejected read returns an error in every mode.
+fn readChecked(comptime read: anytype, args: anytype) bool {
+    const c = ctx();
+    c.creating = true;
+    defer c.creating = false;
+    return @call(.auto, read, args);
 }
 
 pub const CommitListener = struct {

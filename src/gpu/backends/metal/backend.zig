@@ -69,6 +69,8 @@ pub const Backend = struct {
     pub const copyBufferToImage = commands.copyBufferToImage;
     pub const pushDebugGroup = commands.pushDebugGroup;
     pub const popDebugGroup = commands.popDebugGroup;
+    pub const readBuffer = commands.readBuffer;
+    pub const readImage = commands.readImage;
 
     allocator: std.mem.Allocator,
     valid: bool = false,
@@ -1124,6 +1126,8 @@ comptime {
     _ = &Backend.copyBufferToImage;
     _ = &Backend.pushDebugGroup;
     _ = &Backend.popDebugGroup;
+    _ = &Backend.readBuffer;
+    _ = &Backend.readImage;
     _ = &queryBufferInfo;
     _ = &queryImageInfo;
     _ = &querySamplerInfo;

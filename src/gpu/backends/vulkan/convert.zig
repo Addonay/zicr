@@ -130,6 +130,8 @@ pub fn imageType(kind: e.ImageType) i32 {
 pub fn imageUsage(usg: t.ImageUsage) u32 {
     var res: u32 = sdk.IMAGE_USAGE_TRANSFER_DST_BIT | sdk.IMAGE_USAGE_SAMPLED_BIT;
     if (usg.storage_image) res |= sdk.IMAGE_USAGE_STORAGE_BIT;
+    // readImage copies from the image
+    if (usg.copy_src) res |= sdk.IMAGE_USAGE_TRANSFER_SRC_BIT;
     if (usg.color_attachment or usg.resolve_attachment) res |= sdk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     if (usg.depth_stencil_attachment) res |= sdk.IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     return res;

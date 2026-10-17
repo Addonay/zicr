@@ -483,7 +483,7 @@ pub fn stagingCopyDiscard(self: *Backend) void {
     self.stage.copy.size = 0;
 }
 
-fn stagingCopyBegin(self: *Backend) sdk.CommandBuffer {
+pub fn stagingCopyBegin(self: *Backend) sdk.CommandBuffer {
     const cmd_buf = self.stage.copy.cmd_buf;
     const begin_info: sdk.CommandBufferBeginInfo = .{
         .sType = sdk.STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -497,7 +497,7 @@ fn stagingCopyBegin(self: *Backend) sdk.CommandBuffer {
 }
 
 /// Submits the copy command buffer and waits for the queue to become idle.
-fn stagingCopyEnd(self: *Backend, cmd_buf: sdk.CommandBuffer) void {
+pub fn stagingCopyEnd(self: *Backend, cmd_buf: sdk.CommandBuffer) void {
     _ = self.fns.device.vkEndCommandBuffer(cmd_buf);
     var cmd = cmd_buf;
     const submit_info: sdk.SubmitInfo = .{

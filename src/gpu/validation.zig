@@ -1458,3 +1458,47 @@ pub fn passAttachmentLimits(pass: *const t.Pass) bool {
     }
     return ok;
 }
+
+// ---------------------------------------------------------------- readback (zicr extension)
+
+pub fn readBuffer(buf: *const core.Buffer, offset: usize, len: usize) bool {
+    if (!enabled()) return true;
+    const s = core.state();
+    var v: Validator = .{};
+    v.check(!s.cur_pass.in_pass, .validate_readbuffer_inside_pass);
+    v.check(buf.cmn.usage.copy_src, .validate_readbuffer_usage);
+    v.check(len > 0, .validate_readbuffer_empty);
+    v.check(@as(u128, offset) + len <= buf.cmn.size, .validate_readbuffer_range);
+    return v.end();
+}
+
+/// `region` has defaults resolved; checks it against the image and `len`.
+pub fn readImage(img: *const core.Image, region: *const core.ReadRegion, len: usize) bool {
+    if (!enabled()) return true;
+    const s = core.state();
+    const cmn = &img.cmn;
+    var v: Validator = .{};
+    v.check(!s.cur_pass.in_pass, .validate_readimage_inside_pass);
+    v.check(cmn.usage.copy_src, .validate_readimage_usage);
+    v.check(!formats.isCompressed(cmn.pixel_format) and !core.isDepthOrDepthStencilFormat(cmn.pixel_format), .validate_readimage_pixelformat);
+    v.check(cmn.sample_count == 1, .validate_readimage_msaa);
+    const mip_ok = region.mip_level < cmn.num_mipmaps;
+    v.check(mip_ok, .validate_readimage_miplevel);
+    if (!mip_ok) return v.end();
+    const mip: i32 = @intCast(region.mip_level);
+    const mip_width: u64 = @intCast(core.miplevelDim(cmn.width, mip));
+    const mip_height: u64 = @intCast(core.miplevelDim(cmn.height, mip));
+    const mip_slices: u64 = @intCast(mipDepthOrSlices(cmn, mip));
+    v.check(region.width > 0 and region.height > 0 and region.num_slices > 0 and
+        @as(u64, region.x) + region.width <= mip_width and
+        @as(u64, region.y) + region.height <= mip_height and
+        @as(u64, region.slice) + region.num_slices <= mip_slices, .validate_readimage_region);
+    if (!v.failed) {
+        const row_bytes: usize = @intCast(formats.rowPitch(cmn.pixel_format, @intCast(region.width), 1));
+        v.check(region.bytes_per_row >= row_bytes, .validate_readimage_bytesperrow);
+        v.check(region.bytes_per_slice >= region.bytes_per_row * region.height, .validate_readimage_bytesperslice);
+        const required = @as(u128, region.num_slices - 1) * region.bytes_per_slice + @as(u128, region.height - 1) * region.bytes_per_row + row_bytes;
+        v.check(len >= required, .validate_readimage_dst_size);
+    }
+    return v.end();
+}

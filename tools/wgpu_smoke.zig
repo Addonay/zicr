@@ -1630,6 +1630,148 @@ fn testComputeStorageBuffer(ctx: *const Ctx) !void {
     }
 }
 
+// ---- readback (zicr raw API: gfx.readImage / gfx.readBuffer)
+
+fn expectRead(ok: bool) !void {
+    if (!ok) return error.ReadFailed;
+    try checkNoWgpuErrors();
+}
+
+/// Every pixel of a solid-color full-screen draw, read with gfx.readImage (tight rows).
+fn testReadRenderedImage(ctx: *const Ctx) !void {
+    _ = ctx;
+    const img = gfx.makeImage(.{ .width = 64, .height = 64, .pixel_format = .rgba8, .usage = .{ .color_attachment = true, .copy_src = true } });
+    try expectState(gfx.queryImageState(img));
+    const view = gfx.makeView(.{ .color_attachment = .{ .image = img } });
+    const pip = colorPipeline(uniformShader());
+    beginTarget(view, .{ 0, 0, 0, 1 });
+    drawFullscreen(pip, .{ .z = 0.5, .scale = 1, .color = .{ 0.25, 0.5, 0.75, 1 } });
+    gfx.endPass();
+    gfx.commit();
+    var out: [64 * 64 * 4]u8 = undefined;
+    try expectRead(gfx.readImage(.{ .image = img }, &out));
+    for (0..64) |y| {
+        for (0..64) |x| try expectPixel(&out, x, y, .{ 64, 128, 191, 255 });
+    }
+}
+
+/// Storage buffer written by compute, read at an unaligned offset and size.
+fn testReadStorageBuffer(ctx: *const Ctx) !void {
+    _ = ctx;
+    const sbuf = gfx.makeBuffer(.{ .usage = .{ .storage_buffer = true, .copy_src = true }, .size = 256 });
+    try expectState(gfx.queryBufferState(sbuf));
+    const sview = gfx.makeView(.{ .storage_buffer = .{ .buffer = sbuf } });
+    var shd_desc: gfx.ShaderDesc = .{ .compute_func = .{ .source = storage_buffer_compute_wgsl, .entry = "cs" } };
+    shd_desc.views[0].storage_buffer = .{ .stage = .compute, .readonly = false, .wgsl_group1_binding_n = 0 };
+    const pip = gfx.makePipeline(.{ .shader = gfx.makeShader(shd_desc), .compute = true });
+    gfx.beginPass(.{ .compute = true });
+    gfx.applyPipeline(pip);
+    var bindings: gfx.Bindings = .{};
+    bindings.views[0] = sview;
+    gfx.applyBindings(bindings);
+    gfx.dispatch(1, 1, 1);
+    gfx.endPass();
+    gfx.commit();
+
+    var all: [256]u8 = undefined;
+    try expectRead(gfx.readBuffer(sbuf, 0, &all));
+    for (0..64) |i| {
+        if (std.mem.readInt(u32, all[i * 4 ..][0..4], .little) != i * 3 + 1) return error.ComputeMismatch;
+    }
+    // offset 5 and size 7 are not multiples of 4
+    var part: [7]u8 = undefined;
+    try expectRead(gfx.readBuffer(sbuf, 5, &part));
+    try expectEqualBytes(all[5..12], &part);
+    var tail: [3]u8 = undefined;
+    try expectRead(gfx.readBuffer(sbuf, 253, &tail));
+    try expectEqualBytes(all[253..256], &tail);
+}
+
+/// Sub-region of a compute-written storage image with a row pitch larger than the row.
+fn testReadImageRegion(ctx: *const Ctx) !void {
+    _ = ctx;
+    const simg = gfx.makeImage(.{ .width = 64, .height = 64, .pixel_format = .rgba8, .usage = .{ .storage_image = true, .copy_src = true } });
+    try expectState(gfx.queryImageState(simg));
+    const sview = gfx.makeView(.{ .storage_image = .{ .image = simg } });
+    var shd_desc: gfx.ShaderDesc = .{ .compute_func = .{ .source = storage_image_compute_wgsl, .entry = "cs" } };
+    shd_desc.views[0].storage_image = .{ .stage = .compute, .image_type = .@"2d", .access_format = .rgba8, .writeonly = true, .wgsl_group1_binding_n = 0 };
+    const pip = gfx.makePipeline(.{ .shader = gfx.makeShader(shd_desc), .compute = true });
+    gfx.beginPass(.{ .compute = true });
+    gfx.applyPipeline(pip);
+    var bindings: gfx.Bindings = .{};
+    bindings.views[0] = sview;
+    gfx.applyBindings(bindings);
+    gfx.dispatch(8, 8, 1);
+    gfx.endPass();
+    gfx.commit();
+
+    // 10x4 texels at (5,7), 64 bytes per row (40 used), 256 bytes per slice
+    var out: [256]u8 = @splat(0);
+    try expectRead(gfx.readImage(.{ .image = simg, .x = 5, .y = 7, .width = 10, .height = 4, .bytes_per_row = 64, .bytes_per_slice = 256 }, &out));
+    for (0..4) |j| {
+        for (0..10) |i| {
+            const x = 5 + i;
+            const y = 7 + j;
+            const r: i32 = @intFromFloat(@round(@as(f32, @floatFromInt(x)) / 63.0 * 255.0));
+            const g: i32 = @intFromFloat(@round(@as(f32, @floatFromInt(y)) / 63.0 * 255.0));
+            const pixel = out[j * 64 + i * 4 ..][0..4];
+            if (@abs(@as(i32, pixel[0]) - r) > 1 or @abs(@as(i32, pixel[1]) - g) > 1 or pixel[2] != 0 or pixel[3] != 255) {
+                std.debug.print("region texel ({d},{d}) is {any}\n", .{ x, y, pixel });
+                return error.PixelMismatch;
+            }
+        }
+        // the row padding is not written
+        for (40..64) |pad| if (out[j * 64 + pad] != 0) return error.RowPaddingWritten;
+    }
+}
+
+/// A non-zero array layer at mip level 1, written by copyBufferToImage from a GPU buffer.
+fn testReadArrayLayerMip(ctx: *const Ctx) !void {
+    _ = ctx;
+    const aimg = gfx.makeImage(.{ .type = .array, .width = 4, .height = 4, .num_slices = 2, .num_mipmaps = 2, .pixel_format = .rgba8, .usage = .{ .copy_dst = true, .copy_src = true } });
+    try expectState(gfx.queryImageState(aimg));
+    const src = gfx.makeBuffer(.{ .usage = .{ .write_unsealed = true, .copy_src = true }, .size = 512 });
+    try expectUnsealed(gfx.queryBufferState(src));
+    // two rows of 8 bytes, 256 bytes apart (copies from GPU buffers need 256-byte rows)
+    var data: [512]u8 = @splat(0);
+    for (0..8) |i| data[i] = @intCast(i + 1);
+    for (0..8) |i| data[256 + i] = @intCast(i + 9);
+    gfx.writeBufferUnsealed(.{ .dst = .{ .buffer = src }, .src = .{ .data = gfx.Range.fromSlice(u8, &data) }, .size = data.len });
+    gfx.sealBuffer(src);
+    gfx.copyBufferToImage(.{
+        .src = .{ .buffer = src, .offset = 0, .bytes_per_row = 256, .bytes_per_slice = 512 },
+        .dst = .{ .image = aimg, .mip_level = 1, .x = 0, .y = 0, .slice = 1 },
+        .size = .{ .width = 2, .height = 2, .num_slices = 1 },
+    });
+    gfx.commit();
+
+    var out: [16]u8 = undefined;
+    try expectRead(gfx.readImage(.{ .image = aimg, .mip_level = 1, .slice = 1 }, &out));
+    for (0..16) |i| {
+        if (out[i] != i + 1) {
+            std.debug.print("mip 1 layer 1 byte {d} is {d}\n", .{ i, out[i] });
+            return error.PixelMismatch;
+        }
+    }
+    // mip 0 of layer 0 was never written
+    var zeros: [64]u8 = @splat(0);
+    try expectRead(gfx.readImage(.{ .image = aimg, .mip_level = 0, .slice = 0, .num_slices = 1 }, &zeros));
+    for (zeros) |value| if (value != 0) return error.PixelMismatch;
+}
+
+/// A staging buffer written with write_transient, read at an unaligned offset.
+fn testReadStagingBuffer(ctx: *const Ctx) !void {
+    _ = ctx;
+    const staging = gfx.makeBuffer(.{ .usage = .{ .staging_buffer = true, .write_transient = true, .copy_src = true }, .size = 16 });
+    var data: [16]u8 = undefined;
+    for (0..16) |i| data[i] = @intCast(100 + i);
+    gfx.writeBufferTransient(.{ .dst = .{ .buffer = staging }, .src = .{ .data = gfx.Range.fromSlice(u8, &data) }, .size = 16 });
+    gfx.commit();
+    var out: [7]u8 = undefined;
+    try expectRead(gfx.readBuffer(staging, 2, &out));
+    try expectEqualBytes(data[2..9], &out);
+}
+
 const Scenario = struct { []const u8, *const fn (*const Ctx) anyerror!void };
 const scenarios = [_]Scenario{
     .{ "1 writeBufferTransient over frames", testWriteBufferTransient },
@@ -1646,6 +1788,11 @@ const scenarios = [_]Scenario{
     .{ "10b triangle strip with 16-bit indices", testStripIndexed },
     .{ "10c cube texture", testCubeTexture },
     .{ "10d array texture", testArrayTexture },
+    .{ "R1 readImage of a rendered image", testReadRenderedImage },
+    .{ "R2 readBuffer of storage buffer, unaligned", testReadStorageBuffer },
+    .{ "R3 readImage sub-region, non-tight pitch", testReadImageRegion },
+    .{ "R4 readImage array layer at mip 1", testReadArrayLayerMip },
+    .{ "R5 readBuffer of staging buffer, unaligned", testReadStagingBuffer },
 };
 
 fn runSokolChecks(ctx: *const Ctx, resolver: *Resolver, device: Device, disable_cache: bool) !void {

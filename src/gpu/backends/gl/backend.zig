@@ -11,6 +11,7 @@ const convert = @import("convert.zig");
 const r = @import("resources.zig");
 const Cache = @import("cache.zig").Cache;
 const driver_api = @import("dispatch.zig");
+const core = @import("../../core.zig");
 
 const apple_unpack_workaround = switch (builtin.os.tag) {
     .macos, .ios, .maccatalyst, .tvos, .watchos, .visionos => true,
@@ -584,6 +585,66 @@ pub const Backend = struct {
         }
         return true;
     }
+    /// Readback (zicr extension). GL reads synchronize with all submitted commands.
+    pub fn readBuffer(self: *Backend, buffer: *r.Buffer, usage: t.BufferUsage, active_slot: i32, offset: usize, out: []u8) bool {
+        _ = usage;
+        if (buffer.staging) |data| {
+            @memcpy(out, data[offset..][0..out.len]);
+            return true;
+        }
+        const driver = self.cache.driver;
+        if (self.cache.features.compute) driver.memoryBarrier.?(c.all_barrier_bits);
+        driver.bindBuffer.?(c.copy_read_buffer, buffer.ids[@intCast(active_slot)]);
+        defer driver.bindBuffer.?(c.copy_read_buffer, 0);
+        // GLES has no glGetBufferSubData, even if the loader resolves the symbol
+        if (!self.gles) if (driver.getBufferSubData) |getBufferSubData| {
+            getBufferSubData(c.copy_read_buffer, @intCast(offset), @intCast(out.len), out.ptr);
+            return true;
+        };
+        const map = driver.mapBufferRange orelse return false;
+        const mapped: [*]const u8 = @ptrCast(map(c.copy_read_buffer, @intCast(offset), @intCast(out.len), c.map_read_bit) orelse return false);
+        @memcpy(out, mapped[0..out.len]);
+        return driver.unmapBuffer.?(c.copy_read_buffer) != 0;
+    }
+
+    /// Readback (zicr extension): reads an image region in storage row order
+    /// through the backend's framebuffer object, one slice at a time.
+    pub fn readImage(self: *Backend, image: *r.Image, desc: t.ImageDesc, active_slot: i32, region: *const core.ReadRegion, out: []u8) bool {
+        const driver = self.cache.driver;
+        const read_pixels = driver.readPixels orelse return false;
+        if (self.cache.features.compute) driver.memoryBarrier.?(c.all_barrier_bits);
+        const saved: u32 = @bitCast(self.integer(c.framebuffer_binding));
+        defer driver.bindFramebuffer.?(c.framebuffer, saved);
+        driver.bindFramebuffer.?(c.framebuffer, self.framebuffer);
+        const texture = image.ids[@intCast(active_slot)];
+        const mip: i32 = @intCast(region.mip_level);
+        const bytes_per_pixel: usize = @intCast(formats.pixelSize(desc.pixel_format));
+        driver.pixelStorei.?(c.pack_alignment, 1);
+        driver.pixelStorei.?(c.pack_row_length, @intCast(region.bytes_per_row / bytes_per_pixel));
+        defer {
+            driver.pixelStorei.?(c.pack_row_length, 0);
+            driver.pixelStorei.?(c.pack_alignment, 4);
+        }
+        driver.readBuffer.?(c.color_attachment0);
+        var ok = true;
+        for (0..region.num_slices) |i| {
+            const slice: i32 = @intCast(region.slice + i);
+            switch (desc.type) {
+                .@"2d" => driver.framebufferTexture2D.?(c.framebuffer, c.color_attachment0, image.target, texture, mip),
+                .cube => driver.framebufferTexture2D.?(c.framebuffer, c.color_attachment0, convert.cubeFace(slice), texture, mip),
+                else => driver.framebufferTextureLayer.?(c.framebuffer, c.color_attachment0, texture, mip, slice),
+            }
+            if (driver.checkFramebufferStatus.?(c.framebuffer) != c.framebuffer_complete) {
+                ok = false;
+                break;
+            }
+            const dst = out[i * region.bytes_per_slice ..];
+            read_pixels(@intCast(region.x), @intCast(region.y), @intCast(region.width), @intCast(region.height), convert.pixelFormat(desc.pixel_format), convert.pixelType(desc.pixel_format), dst.ptr);
+        }
+        driver.framebufferTexture2D.?(c.framebuffer, c.color_attachment0, c.texture_2d, 0, 0);
+        return ok;
+    }
+
     pub fn discardView(self: *Backend, view: *r.View) void {
         for (&view.texture_views) |*id| {
             if (id.* == 0) continue;

@@ -476,6 +476,30 @@ pub fn copyBufferToImage(src: *core.Buffer, dst: *core.Image, desc: *const t.Cop
     }
 }
 
+pub fn readBuffer(buf: *core.Buffer, offset: usize, out: []u8) bool {
+    return switch (impl().*) {
+        inline .vulkan, .wgpu, .metal => |*b| b.readBuffer(buf, offset, out),
+        .dummy => blk: {
+            @memset(out, 0);
+            break :blk true;
+        },
+        .gl => |*gl| gl.readBuffer(&buf.native.gl, buf.cmn.usage, buf.cmn.active_slot, offset, out),
+        .d3d11 => |*dx| dx.readBuffer(&buf.native.d3d11, buf.desc, offset, out),
+    };
+}
+
+pub fn readImage(img: *core.Image, region: *const core.ReadRegion, out: []u8) bool {
+    return switch (impl().*) {
+        inline .vulkan, .wgpu, .metal => |*b| b.readImage(img, region, out),
+        .dummy => blk: {
+            @memset(out, 0);
+            break :blk true;
+        },
+        .gl => |*gl| gl.readImage(&img.native.gl, img.desc, img.cmn.active_slot, region, out),
+        .d3d11 => |*dx| dx.readImage(&img.native.d3d11, img.desc, region, out),
+    };
+}
+
 pub fn pushDebugGroup(name: [*:0]const u8) void {
     switch (impl().*) {
         inline .vulkan, .wgpu, .metal => |*b| b.pushDebugGroup(name),

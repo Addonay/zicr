@@ -1291,7 +1291,168 @@ const scenarios = [_]struct { name: []const u8, run: *const fn (*Ctx) anyerror!v
     .{ .name = "8", .run = scenarioStorageImage },
     .{ .name = "9", .run = scenarioRecreate },
     .{ .name = "10", .run = scenarioBlendScissor },
+    .{ .name = "11", .run = scenarioReadback },
 };
+
+// 11. readback through the raw API: gfx.readImage / gfx.readBuffer
+const sb_write_cs = @embedFile("shaders/sbwrite.comp.spv");
+var sb_write_code: [sb_write_cs.len]u8 align(4) = sb_write_cs.*;
+
+fn expectReadback(name: []const u8, ok: bool) !void {
+    if (!ok) {
+        std.debug.print("FAIL {s}: readImage/readBuffer returned false\n", .{name});
+        return error.ReadFailed;
+    }
+}
+
+fn scenarioReadback(ctx: *Ctx) !void {
+    _ = ctx;
+    const shd = colorShader();
+    const pip = try colorPipeline(shd, no_depth, rgba_target, 1);
+
+    // (a) full image: blue background, red left half, green top-left quadrant
+    const img = gfx.makeImage(.{ .width = width, .height = height, .pixel_format = .rgba8, .usage = .{ .color_attachment = true, .copy_src = true } });
+    try valid(gfx.queryImageState(img), "readback image");
+    const cv = gfx.makeView(.{ .color_attachment = .{ .image = img } });
+    var verts: [3 * 28]f32 = undefined;
+    fillColorQuad(verts[0..28], -1, -1, 1, 1, 0.5, .{ 0, 0, 1, 1 });
+    fillColorQuad(verts[28..56], -1, -1, 0, 1, 0.3, .{ 1, 0, 0, 1 });
+    fillColorQuad(verts[56..84], -1, 0, 0, 1, 0.1, .{ 0, 1, 0, 1 });
+    var indices: [18]u16 = undefined;
+    for (0..3) |q| for (0..6) |i| {
+        indices[q * 6 + i] = @intCast(quad_idx[i] + q * 4);
+    };
+    const vb = gfx.makeBuffer(.{ .data = gfx.Range.fromSlice(f32, &verts) });
+    const ib = gfx.makeBuffer(.{ .usage = .{ .index_buffer = true }, .data = gfx.Range.fromSlice(u16, &indices) });
+    var pass: gfx.Pass = .{};
+    pass.attachments.colors[0] = cv;
+    pass.action.colors[0] = .{ .load_action = .clear, .store_action = .store, .clear_value = .{ .r = 0, .g = 0, .b = 0, .a = 1 } };
+    gfx.beginPass(pass);
+    drawWith(pip, vb, ib, 0, 6);
+    drawWith(pip, vb, ib, 6, 6);
+    drawWith(pip, vb, ib, 12, 6);
+    gfx.endPass();
+
+    // (b) a storage buffer written by compute, read at an offset
+    const sbuf = gfx.makeBuffer(.{ .size = 64, .usage = .{ .storage_buffer = true, .copy_src = true } });
+    var cdesc: gfx.ShaderDesc = .{ .compute_func = .{ .bytecode = gfx.Range.fromSlice(u8, &sb_write_code), .entry = "main" } };
+    cdesc.views[1].storage_buffer = .{ .stage = .compute, .readonly = false, .spirv_set1_binding_n = 2 };
+    const cshd = gfx.makeShader(cdesc);
+    const cpip = gfx.makePipeline(.{ .compute = true, .shader = cshd });
+    try valid(gfx.queryPipelineState(cpip), "readback compute");
+    const sview = gfx.makeView(.{ .storage_buffer = .{ .buffer = sbuf } });
+    gfx.beginPass(.{ .compute = true });
+    gfx.applyPipeline(cpip);
+    var cbnd: gfx.Bindings = .{};
+    cbnd.views[1] = sview;
+    gfx.applyBindings(cbnd);
+    gfx.dispatch(1, 1, 1);
+    gfx.endPass();
+
+    // (c) an array image: layer 1 mip 0 magenta, mip 1 yellow, layer 0 mip 0 black
+    const arr = gfx.makeImage(.{ .type = .array, .width = width, .height = height, .num_slices = 2, .num_mipmaps = 2, .pixel_format = .rgba8, .usage = .{ .color_attachment = true, .copy_src = true } });
+    try valid(gfx.queryImageState(arr), "array readback image");
+    const clears = [_]struct { mip: i32, slice: i32, c: [4]f32 }{
+        .{ .mip = 0, .slice = 0, .c = .{ 0, 0, 0, 1 } },
+        .{ .mip = 0, .slice = 1, .c = .{ 1, 0, 1, 1 } },
+        .{ .mip = 1, .slice = 0, .c = .{ 1, 1, 0, 1 } },
+    };
+    for (clears) |cl| {
+        const v = gfx.makeView(.{ .color_attachment = .{ .image = arr, .mip_level = cl.mip, .slice = cl.slice } });
+        var p: gfx.Pass = .{};
+        p.attachments.colors[0] = v;
+        p.action.colors[0] = .{ .load_action = .clear, .store_action = .store, .clear_value = .{ .r = cl.c[0], .g = cl.c[1], .b = cl.c[2], .a = cl.c[3] } };
+        gfx.beginPass(p);
+        gfx.endPass();
+    }
+
+    // (d) a transient buffer written with writeBufferTransient
+    const tbuf = gfx.makeBuffer(.{ .size = 16, .usage = .{ .write_transient = true, .copy_src = true } });
+    const tdata = [4]u32{ 0x11, 0x22, 0x33, 0x44 };
+    gfx.writeBufferTransient(.{ .src = .{ .data = gfx.Range.fromSlice(u32, &tdata), .offset = 0 }, .dst = .{ .buffer = tbuf, .offset = 0 }, .size = 16 });
+
+    gfx.commit();
+
+    // (a) full image
+    var full: Pixels = undefined;
+    try expectReadback("11a full image", gfx.readImage(.{ .image = img }, std.mem.sliceAsBytes(&full)));
+    var expected: Pixels = undefined;
+    for (0..height) |y| for (0..width) |x| {
+        expected[y * width + x] = if (x < 32 and y < 32) .{ 0, 255, 0, 255 } else if (x < 32) .{ 255, 0, 0, 255 } else .{ 0, 0, 255, 255 };
+    };
+    try check("11a readImage full image", &full, &expected);
+
+    // (a2) sub-region with padded row and slice pitches; the padding must stay untouched
+    const bpr: usize = 20 * 4 + 12;
+    const bps: usize = bpr * 7 + 8;
+    var sub: [bps]u8 = @splat(0xAA);
+    try expectReadback("11a2 sub-region", gfx.readImage(.{ .image = img, .x = 10, .y = 5, .width = 20, .height = 7, .num_slices = 1, .bytes_per_row = bpr, .bytes_per_slice = bps }, &sub));
+    var sub_bad: u32 = 0;
+    for (0..7) |r| {
+        for (0..20) |c| {
+            const px = expected[(5 + r) * width + (10 + c)];
+            if (!std.mem.eql(u8, sub[r * bpr + c * 4 ..][0..4], &px)) sub_bad += 1;
+        }
+        for (r * bpr + 80..(r + 1) * bpr) |i| {
+            if (sub[i] != 0xAA) sub_bad += 1;
+        }
+    }
+    for (bpr * 7..bps) |i| {
+        if (sub[i] != 0xAA) sub_bad += 1;
+    }
+    if (sub_bad != 0) {
+        std.debug.print("FAIL 11a2 sub-region: {d} bad bytes\n", .{sub_bad});
+        return error.PixelMismatch;
+    }
+    std.debug.print("pass 11a2 readImage sub-region with padded pitches\n", .{});
+
+    // (b) storage buffer, whole and at offset 16
+    var sbytes: [64]u8 = undefined;
+    try expectReadback("11b storage buffer", gfx.readBuffer(sbuf, 0, &sbytes));
+    var sbytes2: [32]u8 = undefined;
+    try expectReadback("11b storage buffer offset", gfx.readBuffer(sbuf, 16, &sbytes2));
+    var floats: [16]f32 = undefined;
+    @memcpy(std.mem.sliceAsBytes(&floats), &sbytes);
+    for (0..4) |i| {
+        const want = [4]f32{ @floatFromInt(i), 2, 3, 4 };
+        if (!std.mem.eql(f32, floats[i * 4 ..][0..4], &want)) {
+            std.debug.print("FAIL 11b storage buffer: vec4 {d} is {any}\n", .{ i, floats[i * 4 ..][0..4] });
+            return error.PixelMismatch;
+        }
+    }
+    if (!std.mem.eql(u8, &sbytes2, sbytes[16..48])) {
+        std.debug.print("FAIL 11b storage buffer offset read\n", .{});
+        return error.PixelMismatch;
+    }
+    std.debug.print("pass 11b readBuffer of a compute-written storage buffer\n", .{});
+
+    // (c) array layer 1 and mip 1, plus layer 0 mip 0
+    var layer1: Pixels = undefined;
+    try expectReadback("11c layer 1", gfx.readImage(.{ .image = arr, .mip_level = 0, .slice = 1, .num_slices = 1 }, std.mem.sliceAsBytes(&layer1)));
+    try check("11c readImage array layer 1 mip 0", &layer1, &solid(.{ 255, 0, 255, 255 }));
+    var layer0: Pixels = undefined;
+    try expectReadback("11c layer 0", gfx.readImage(.{ .image = arr, .mip_level = 0, .slice = 0, .num_slices = 1 }, std.mem.sliceAsBytes(&layer0)));
+    try check("11c readImage array layer 0 mip 0", &layer0, &solid(.{ 0, 0, 0, 255 }));
+    var mip1: [32 * 32][4]u8 = undefined;
+    try expectReadback("11c mip 1", gfx.readImage(.{ .image = arr, .mip_level = 1, .slice = 0, .num_slices = 1 }, std.mem.sliceAsBytes(&mip1)));
+    for (mip1) |px| {
+        if (!std.mem.eql(u8, &px, &[4]u8{ 255, 255, 0, 255 })) {
+            std.debug.print("FAIL 11c mip 1: pixel {any}\n", .{px});
+            return error.PixelMismatch;
+        }
+    }
+    std.debug.print("pass 11c readImage array layer and mip level\n", .{});
+
+    // (d) transient buffer
+    var tout: [16]u8 = undefined;
+    try expectReadback("11d transient", gfx.readBuffer(tbuf, 0, &tout));
+    const want_t = std.mem.sliceAsBytes(&tdata);
+    if (!std.mem.eql(u8, &tout, want_t)) {
+        std.debug.print("FAIL 11d transient buffer: {any}\n", .{tout});
+        return error.PixelMismatch;
+    }
+    std.debug.print("pass 11d readBuffer of a transient buffer\n", .{});
+}
 
 /// Finds the memory type index that satisfies `type_bits` and `flags`.
 fn findMemoryType(props: *const PhysicalDeviceMemoryProperties, type_bits: u32, flags: u32) !u32 {

@@ -252,3 +252,10 @@ pub const vertex_attrib_array_barrier_bit: u32 = 0x00000001;
 pub const vertex_shader: u32 = 0x8B31;
 pub const write_only: u32 = 0x88B9;
 pub const zero: u32 = 0;
+
+// readback (zicr extension)
+pub const pack_alignment: u32 = 0x0D05;
+pub const pack_row_length: u32 = 0x0D02;
+pub const map_read_bit: u32 = 0x0001;
+pub const read_framebuffer_binding: u32 = 0x8CAA;
+pub const all_barrier_bits: u32 = 0xFFFFFFFF;

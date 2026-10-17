@@ -10,6 +10,22 @@ const sdk = @import("sdk.zig");
 const convert = @import("convert.zig");
 const payload = @import("resources.zig");
 
+const map_mode_read: u64 = 1;
+const callback_mode_allow_spontaneous: u32 = 3;
+const map_status_success: u32 = 1;
+const max_map_spins: usize = 1 << 26;
+
+const MapWait = struct {
+    done: bool = false,
+    status: u32 = 0,
+};
+
+fn onMapped(status: u32, _: sdk.StringView, userdata1: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
+    const wait: *MapWait = @ptrCast(@alignCast(userdata1.?));
+    wait.status = status;
+    @atomicStore(bool, &wait.done, true, .release);
+}
+
 /// Extra size of the uniform buffer, on top of the requested uniform_buffer_size.
 const max_uniform_update_size: u32 = 1 << 16;
 const max_ub_bindgroup_entries = 8;
@@ -84,6 +100,8 @@ pub const Backend = struct {
     procs: sdk.Procs,
     dev: sdk.Device,
     queue_handle: sdk.Queue,
+    /// wgpu-native's wgpuDevicePoll, used to wait for mapping; null if the library lacks it.
+    device_poll: ?sdk.DevicePollFn = null,
     limits: sdk.Limits = .{},
     cmd_enc: ?sdk.CommandEncoder = null,
     rpass_enc: ?sdk.RenderPassEncoder = null,
@@ -107,6 +125,9 @@ pub const Backend = struct {
             .bindgroups_pool = undefined,
         };
         self.queue_handle = self.procs.wgpuDeviceGetQueue(self.dev) orelse return error.WgpuInitFailed;
+        if (get_proc_address("wgpuDevicePoll", env.user_data)) |address| {
+            self.device_poll = @ptrCast(@alignCast(address));
+        }
         self.initCaps(s);
         try self.uniformSystemInit(s.desc.uniform_buffer_size);
         errdefer self.uniformSystemDiscard();
@@ -675,6 +696,8 @@ pub const Backend = struct {
             return .valid;
         }
         var usage: u64 = sdk.TextureUsage.texture_binding;
+        // NOTE: not in the C backend, which never reads images back; readImage needs it
+        if (desc.usage.copy_src) usage |= sdk.TextureUsage.copy_src;
         if (desc.usage.color_attachment or desc.usage.resolve_attachment or desc.usage.depth_stencil_attachment) {
             usage |= sdk.TextureUsage.render_attachment;
         } else {
@@ -1465,6 +1488,115 @@ pub const Backend = struct {
     pub fn pushDebugGroup(self: *Backend, name: [*:0]const u8) void {
         // WebGPU debug groups are not used by sokol-gfx (see _sg_push_debug_group)
         _ = .{ self, name };
+    }
+
+    /// Readback (zicr extension): waits for committed GPU work, copies buffer bytes into `out`.
+    pub fn readBuffer(self: *Backend, buf: *core.Buffer, offset: usize, out: []u8) bool {
+        const res = switch (buf.native) {
+            .wgpu => |*value| value,
+            else => return false,
+        };
+        if (res.staging) |staging| {
+            if (offset + out.len > staging.len) return false;
+            @memcpy(out, staging[offset..][0..out.len]);
+            return true;
+        }
+        const gpu_buf = res.buf orelse return false;
+        // copies need 4-byte aligned offsets and sizes: copy an aligned superset and slice it
+        const start = offset & ~@as(usize, 3);
+        const end = std.mem.alignForward(usize, offset + out.len, 4);
+        const readback = self.createReadback(end - start) orelse return false;
+        defer self.procs.wgpuBufferRelease(readback);
+        const enc = self.procs.wgpuDeviceCreateCommandEncoder(self.dev, null) orelse return false;
+        defer self.procs.wgpuCommandEncoderRelease(enc);
+        self.procs.wgpuCommandEncoderCopyBufferToBuffer(enc, gpu_buf, start, readback, 0, end - start);
+        if (!self.submitEncoder(enc)) return false;
+        if (!self.awaitMap(readback, end - start)) return false;
+        defer self.procs.wgpuBufferUnmap(readback);
+        const mapped: [*]const u8 = @ptrCast(self.procs.wgpuBufferGetConstMappedRange(readback, 0, end - start) orelse return false);
+        @memcpy(out, mapped[offset - start ..][0..out.len]);
+        return true;
+    }
+
+    /// Readback (zicr extension): waits for committed GPU work, copies an image region into `out`.
+    /// The copy uses 256-byte aligned rows and the rows are repacked into the caller's pitches.
+    pub fn readImage(self: *Backend, img: *core.Image, region: *const core.ReadRegion, out: []u8) bool {
+        const tex = switch (img.native) {
+            .wgpu => |value| value.tex orelse return false,
+            else => return false,
+        };
+        const bpp: usize = @intCast(formats.pixelSize(img.cmn.pixel_format));
+        const row_bytes = @as(usize, region.width) * bpp;
+        const aligned_row = std.mem.alignForward(usize, row_bytes, 256);
+        const slice_bytes = aligned_row * region.height;
+        const total = slice_bytes * region.num_slices;
+        const readback = self.createReadback(total) orelse return false;
+        defer self.procs.wgpuBufferRelease(readback);
+        const enc = self.procs.wgpuDeviceCreateCommandEncoder(self.dev, null) orelse return false;
+        defer self.procs.wgpuCommandEncoderRelease(enc);
+        const src: sdk.TexelCopyTextureInfo = .{
+            .texture = tex,
+            .mip_level = region.mip_level,
+            .origin = .{ .x = region.x, .y = region.y, .z = region.slice },
+            .aspect = .all,
+        };
+        const dst: sdk.TexelCopyBufferInfo = .{
+            .layout = .{ .offset = 0, .bytes_per_row = @intCast(aligned_row), .rows_per_image = region.height },
+            .buffer = readback,
+        };
+        const extent: sdk.Extent3D = .{ .width = region.width, .height = region.height, .depth_or_array_layers = region.num_slices };
+        self.procs.wgpuCommandEncoderCopyTextureToBuffer(enc, &src, &dst, &extent);
+        if (!self.submitEncoder(enc)) return false;
+        if (!self.awaitMap(readback, total)) return false;
+        defer self.procs.wgpuBufferUnmap(readback);
+        const mapped: [*]const u8 = @ptrCast(self.procs.wgpuBufferGetConstMappedRange(readback, 0, total) orelse return false);
+        for (0..region.num_slices) |slice| {
+            for (0..region.height) |row| {
+                const from = slice * slice_bytes + row * aligned_row;
+                const to = slice * region.bytes_per_slice + row * region.bytes_per_row;
+                @memcpy(out[to..][0..row_bytes], mapped[from..][0..row_bytes]);
+            }
+        }
+        return true;
+    }
+
+    fn createReadback(self: *Backend, size: usize) ?sdk.Buffer {
+        return self.procs.wgpuDeviceCreateBuffer(self.dev, &sdk.BufferDescriptor{
+            .usage = sdk.BufferUsage.map_read | sdk.BufferUsage.copy_dst,
+            .size = size,
+        });
+    }
+
+    fn submitEncoder(self: *Backend, enc: sdk.CommandEncoder) bool {
+        const cmd = self.procs.wgpuCommandEncoderFinish(enc, null) orelse return false;
+        defer self.procs.wgpuCommandBufferRelease(cmd);
+        const cmds = [_]?sdk.CommandBuffer{cmd};
+        self.procs.wgpuQueueSubmit(self.queue_handle, 1, &cmds[0]);
+        return true;
+    }
+
+    /// Maps a MapRead buffer and waits until the mapping completes. Spontaneous callbacks fire
+    /// on the implementation's own threads, so the wait polls the device when it is available.
+    fn awaitMap(self: *Backend, buf: sdk.Buffer, size: usize) bool {
+        var wait: MapWait = .{};
+        _ = self.procs.wgpuBufferMapAsync(buf, map_mode_read, 0, size, .{
+            .mode = callback_mode_allow_spontaneous,
+            .callback = onMapped,
+            .userdata1 = &wait,
+        });
+        var spins: usize = 0;
+        while (!@atomicLoad(bool, &wait.done, .acquire)) : (spins += 1) {
+            if (spins > max_map_spins) return false;
+            if (self.device_poll) |poll| {
+                _ = poll(self.dev, 1, null);
+            } else {
+                std.atomic.spinLoopHint();
+            }
+        }
+        if (wait.status != map_status_success) {
+            return false;
+        }
+        return true;
     }
 
     pub fn popDebugGroup(self: *Backend) void {

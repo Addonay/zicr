@@ -44,6 +44,11 @@ pub const Dispatch = struct {
     drawBuffers: ?*const fn (i32, ?[*]const u32) callconv(call_conv) void = null,
     vertexAttribDivisor: ?*const fn (u32, u32) callconv(call_conv) void = null,
     bufferSubData: ?*const fn (u32, isize, isize, ?*const anyopaque) callconv(call_conv) void = null,
+    // readback (zicr extension); getBufferSubData is desktop GL only, GLES maps instead
+    getBufferSubData: ?*const fn (u32, isize, isize, ?*anyopaque) callconv(call_conv) void = null,
+    mapBufferRange: ?*const fn (u32, isize, isize, u32) callconv(call_conv) ?*anyopaque = null,
+    unmapBuffer: ?*const fn (u32) callconv(call_conv) u8 = null,
+    readPixels: ?*const fn (i32, i32, i32, i32, u32, u32, ?*anyopaque) callconv(call_conv) void = null,
     genBuffers: ?*const fn (i32, ?[*]u32) callconv(call_conv) void = null,
     checkFramebufferStatus: ?*const fn (u32) callconv(call_conv) u32 = null,
     framebufferRenderbuffer: ?*const fn (u32, u32, u32, u32) callconv(call_conv) void = null,
