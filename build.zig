@@ -22,7 +22,7 @@ pub fn build(b: *std.Build) void {
     test_options.addOption(?bool, "debug", debug);
     test_options.addOption(bool, "validate_non_fatal", true);
     const test_module = b.createModule(.{
-        .root_source_file = b.path("src/sokol_gfx/root.zig"),
+        .root_source_file = b.path("src/sokol_gfx/tests.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -95,6 +95,52 @@ pub fn build(b: *std.Build) void {
     });
     const d3d_step = b.step("check-d3d11", "Build the native Windows D3D11 rendering smoke executable");
     d3d_step.dependOn(&b.addInstallArtifact(d3d_smoke, .{}).step);
+
+    // tests ported from the upstream sokol repository, one module per part
+    // the upstream suite runs with fatal validation and a logger that doesn't
+    // abort, so VALIDATION_FAILED is logged after every failed validation
+    const upstream_options = b.addOptions();
+    upstream_options.addOption(?bool, "debug", debug);
+    upstream_options.addOption(bool, "validate_non_fatal", false);
+    const upstream_step = b.step("test-upstream", "Run the tests ported from upstream sokol_gfx_test.c");
+    inline for (1..5) |part| {
+        const part_module = b.createModule(.{
+            .root_source_file = b.path(std.fmt.comptimePrint("src/sokol_gfx/upstream_test_{d}.zig", .{part})),
+            .target = target,
+            .optimize = optimize,
+        });
+        part_module.addOptions("sokol_gfx_options", upstream_options);
+        const part_tests = b.addTest(.{ .root_module = part_module });
+        const part_run = b.addRunArtifact(part_tests);
+        b.step(std.fmt.comptimePrint("test-upstream-{d}", .{part}), "Run part of the tests ported from upstream sokol_gfx_test.c").dependOn(&part_run.step);
+        upstream_step.dependOn(&part_run.step);
+    }
+
+    // Differential fuzzing against the original C implementation. The C header is
+    // compiled only into this test tool, never into the library.
+    const ref_c = b.addTranslateC(.{ .root_source_file = b.path("tools/diff/sokol_ref.h"), .target = target, .optimize = optimize });
+    ref_c.addIncludePath(b.path("."));
+    const fuzz_options = b.addOptions();
+    fuzz_options.addOption(?bool, "debug", true);
+    fuzz_options.addOption(bool, "validate_non_fatal", true);
+    const fuzz_gfx = b.createModule(.{ .root_source_file = b.path("src/sokol_gfx/root.zig"), .target = target, .optimize = optimize });
+    fuzz_gfx.addOptions("sokol_gfx_options", fuzz_options);
+    const fuzz_module = b.createModule(.{
+        .root_source_file = b.path("tools/diff/fuzz.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "sokol_gfx", .module = fuzz_gfx },
+            .{ .name = "sokol_ref", .module = ref_c.createModule() },
+        },
+    });
+    fuzz_module.addIncludePath(b.path("."));
+    fuzz_module.addCSourceFile(.{ .file = b.path("tools/diff/sokol_ref.c"), .flags = &.{"-fno-sanitize=undefined"} });
+    const fuzz = b.addExecutable(.{ .name = "sokol-gfx-diff-fuzz", .root_module = fuzz_module });
+    const fuzz_run = b.addRunArtifact(fuzz);
+    fuzz_run.addPassthruArgs();
+    b.step("test-diff", "Differential fuzzing of the Zig core against the original C sokol_gfx.h").dependOn(&fuzz_run.step);
 
     const unit_tests = b.addTest(.{ .root_module = test_module });
     const test_step = b.step("test", "Run native sokol_gfx tests");

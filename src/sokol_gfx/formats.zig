@@ -149,9 +149,16 @@ pub fn surfacePitch(format: enums.PixelFormat, width: i32, height: i32, alignmen
 
 pub fn imageCopySize(format: enums.PixelFormat, bytes_per_row: i32, bytes_per_slice: i32, width: i32, height: i32, num_slices: i32) usize {
     std.debug.assert(width > 0 and height > 0 and num_slices > 0);
-    return @as(usize, @intCast(num_slices - 1)) * @as(usize, @intCast(bytes_per_slice)) +
-        @as(usize, @intCast(numRows(format, height) - 1)) * @as(usize, @intCast(bytes_per_row)) +
-        @as(usize, @intCast(rowPitch(format, width, 1)));
+    // like the original's size_t arithmetic, negative pitches wrap around, which
+    // makes the overflow validation of a copy with a negative pitch fail
+    const wrap = struct {
+        fn f(value: i32) usize {
+            return @bitCast(@as(isize, value));
+        }
+    }.f;
+    return wrap(num_slices - 1) *% wrap(bytes_per_slice) +%
+        wrap(numRows(format, height) - 1) *% wrap(bytes_per_row) +%
+        wrap(rowPitch(format, width, 1));
 }
 
 pub fn mipDimension(base: i32, level: i32) i32 {

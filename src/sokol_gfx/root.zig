@@ -341,10 +341,6 @@ pub const glQuerySamplerInfo = api.glQuerySamplerInfo;
 pub const glQueryShaderInfo = api.glQueryShaderInfo;
 pub const glQueryViewInfo = api.glQueryViewInfo;
 
-test {
-    _ = @import("tests.zig");
-}
-
 /// Native driver interoperation types; no Sokol C implementation is involved.
 pub const native = struct {
     pub const d3d11 = @import("backends/d3d11/sdk.zig");

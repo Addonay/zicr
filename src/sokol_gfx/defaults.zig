@@ -50,8 +50,11 @@ pub fn image(value: t.ImageDesc, env: t.EnvironmentDefaults) t.ImageDesc {
     if (!(usage.immutable or usage.write_transient or usage.copy_dst)) usage.immutable = true;
     result.num_slices = resolve(i32, result.num_slices, if (result.type == .cube) 6 else 1);
     result.num_mipmaps = resolve(i32, result.num_mipmaps, 1);
-    if (usage.color_attachment or usage.resolve_attachment or usage.depth_stencil_attachment) {
-        result.pixel_format = resolve(e.PixelFormat, result.pixel_format, if (usage.depth_stencil_attachment) env.depth_format else env.color_format);
+    if (usage.color_attachment or usage.resolve_attachment) {
+        result.pixel_format = resolve(e.PixelFormat, result.pixel_format, env.color_format);
+        result.sample_count = resolve(i32, result.sample_count, env.sample_count);
+    } else if (usage.depth_stencil_attachment) {
+        result.pixel_format = resolve(e.PixelFormat, result.pixel_format, env.depth_format);
         result.sample_count = resolve(i32, result.sample_count, env.sample_count);
     } else {
         result.pixel_format = resolve(e.PixelFormat, result.pixel_format, .rgba8);
@@ -125,8 +128,8 @@ pub fn pipeline(value: t.PipelineDesc, env: t.EnvironmentDefaults) t.PipelineDes
     result.depth.compare = resolve(e.CompareFunc, result.depth.compare, .always);
     result.depth.pixel_format = resolve(e.PixelFormat, result.depth.pixel_format, env.depth_format);
     result.color_count = if (result.colors[0].pixel_format == .none) 0 else @min(resolve(i32, result.color_count, 1), 8);
-    std.debug.assert(result.color_count >= 0);
-    for (result.colors[0..@intCast(result.color_count)]) |*color| {
+    // a negative color count is passed through to validation, like the original
+    for (result.colors[0..@intCast(@max(result.color_count, 0))]) |*color| {
         color.pixel_format = resolve(e.PixelFormat, color.pixel_format, env.color_format);
         color.write_mask = resolve(e.ColorMask, color.write_mask, .rgba);
         const blend = &color.blend;

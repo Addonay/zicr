@@ -1368,8 +1368,8 @@ pub fn copyBufferToImage(src_buf: *core.Buffer, dst_img: *const core.Image, desc
     // a size that's not a multiple of the block size is allowed when the copy reaches the miplevel edge
     v.check(desc.size.width <= 0 or multiple(desc.size.width, block_dim) or desc.dst.x + desc.size.width == mip_width, .validate_copybuffertoimage_dst_width_multiple);
     v.check(desc.size.height <= 0 or multiple(desc.size.height, block_dim) or desc.dst.y + desc.size.height == mip_height, .validate_copybuffertoimage_dst_height_multiple);
-    if (desc.size.width > 0 and desc.size.height > 0 and desc.size.num_slices > 0 and bpr > 0 and bps > 0) {
-        const required_size = @as(u128, desc.src.offset) + formats.imageCopySize(fmt, bpr, bps, desc.size.width, desc.size.height, desc.size.num_slices);
+    if (desc.size.width > 0 and desc.size.height > 0 and desc.size.num_slices > 0) {
+        const required_size = desc.src.offset +% formats.imageCopySize(fmt, bpr, bps, desc.size.width, desc.size.height, desc.size.num_slices);
         v.check(required_size <= src_buf.cmn.size, .validate_copybuffertoimage_src_overflow);
     }
     v.check(desc.size.num_slices > 0 and desc.size.num_slices <= mip_depth_or_slices, .validate_copybuffertoimage_dst_numslices);
