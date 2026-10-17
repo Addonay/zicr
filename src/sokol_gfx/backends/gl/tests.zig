@@ -557,21 +557,30 @@ test "GL uniforms honor layout offsets and skip optimized-out locations" {
 }
 
 test "GL shader validation rejects missing names, padding mismatch and binding collisions" {
+    // validation is compiled out without the debug option, like SOKOL_DEBUG
+    if (!@import("../../config.zig").debug) return error.SkipZigTest;
     const validation = @import("../../validation.zig");
     const defaults = @import("../../defaults.zig");
+    const core = @import("../../core.zig");
+    const gfx = @import("../../root.zig");
+    try gfx.setup(std.testing.allocator, .dummy, .{});
+    defer gfx.shutdown();
+    // validation rules depend on the active backend
+    core.state().backend = .glcore;
+    defer core.state().backend = .dummy;
     var desc: ResourceMock.t.ShaderDesc = .{ .vertex_func = .{ .source = "vertex" }, .fragment_func = .{ .source = "fragment" } };
     desc.uniform_blocks[0] = .{ .stage = .vertex, .size = 16, .layout = .std140 };
     desc.uniform_blocks[0].glsl_uniforms[0] = .{ .type = .float3 };
     desc = defaults.shader(desc, .glcore);
-    try std.testing.expect(!validation.glShader(desc, .{}));
+    try std.testing.expect(!validation.shaderDesc(&desc));
     desc.uniform_blocks[0].glsl_uniforms[0].glsl_name = "value";
-    try std.testing.expect(validation.glShader(desc, .{}));
+    try std.testing.expect(validation.shaderDesc(&desc));
     desc.uniform_blocks[0].size = 12;
-    try std.testing.expect(!validation.glShader(desc, .{}));
+    try std.testing.expect(!validation.shaderDesc(&desc));
     desc.uniform_blocks[0].size = 16;
     desc.views[0].storage_buffer = .{ .stage = .vertex, .readonly = true };
     desc.views[1].storage_buffer = .{ .stage = .fragment, .readonly = true };
-    try std.testing.expect(!validation.glShader(desc, .{}));
+    try std.testing.expect(!validation.shaderDesc(&desc));
     desc.views[1].storage_buffer.glsl_binding_n = 1;
-    try std.testing.expect(validation.glShader(desc, .{}));
+    try std.testing.expect(validation.shaderDesc(&desc));
 }

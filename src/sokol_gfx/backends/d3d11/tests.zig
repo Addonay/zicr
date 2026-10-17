@@ -243,24 +243,29 @@ test "D3D11 draw variants and top-left coordinate transforms reach the expected 
 }
 
 test "D3D11 validation separates stage register files and rejects shared SRV collisions" {
+    // validation is compiled out without the debug option, like SOKOL_DEBUG
+    if (!@import("../../config.zig").debug) return error.SkipZigTest;
     const validation = @import("../../validation.zig");
+    const core = @import("../../core.zig");
+    const gfx = @import("../../root.zig");
+    try gfx.setup(std.testing.allocator, .dummy, .{});
+    defer gfx.shutdown();
+    // validation rules depend on the active backend
+    core.state().backend = .d3d11;
+    defer core.state().backend = .dummy;
     var desc: t.ShaderDesc = .{ .vertex_func = .{ .source = "vs" }, .fragment_func = .{ .source = "ps" } };
     desc.uniform_blocks[0] = .{ .stage = .vertex, .size = 16 };
     desc.uniform_blocks[1] = .{ .stage = .fragment, .size = 16 };
-    try std.testing.expect(validation.d3dShader(desc, .{}));
+    try std.testing.expect(validation.shaderDesc(&desc));
     desc.uniform_blocks[1].stage = .vertex;
-    try std.testing.expect(!validation.d3dShader(desc, .{}));
+    try std.testing.expect(!validation.shaderDesc(&desc));
     desc.uniform_blocks[1].stage = .fragment;
     desc.views[0].texture.stage = .vertex;
     desc.views[1].storage_buffer = .{ .stage = .vertex, .readonly = true };
-    try std.testing.expect(!validation.d3dShader(desc, .{}));
+    try std.testing.expect(!validation.shaderDesc(&desc));
     desc.views[1].storage_buffer.hlsl_register_t_n = 1;
-    try std.testing.expect(validation.d3dShader(desc, .{}));
-    var pipeline: t.PipelineDesc = .{ .color_count = 1 };
-    pipeline.layout.attrs[0].format = .float2;
-    try std.testing.expect(!validation.d3dPipeline(pipeline, desc, .{ .d3d11_max_unordered_access_views = 8 }, .{}));
-    desc.attrs[0].hlsl_sem_name = "POSITION";
-    try std.testing.expect(validation.d3dPipeline(pipeline, desc, .{ .d3d11_max_unordered_access_views = 8 }, .{}));
+    desc.views[0].texture.stage = .none;
+    try std.testing.expect(validation.shaderDesc(&desc));
 }
 
 test "public D3D11 pipeline validation uses owned shader semantic names" {

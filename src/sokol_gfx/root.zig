@@ -1,4 +1,4 @@
-//! Native Zig port of sokol_gfx. GPU backends are still being ported.
+//! Native Zig port of sokol_gfx: the dummy, GL/GLES, D3D11, Vulkan, WebGPU and Metal backends.
 
 const types = @import("types.zig");
 

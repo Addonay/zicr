@@ -9,16 +9,15 @@ pub const Level = enum(u32) { panic = 0, err = 1, warn = 2, info = 3 };
 
 /// Forwards a log item to the user logger. A panic-level item without a
 /// logger aborts, since continuing would be undefined behaviour in the source.
-pub fn emit(logger: t.Logger, item: LogItem, level: Level, msg: ?[*:0]const u8, src: std.builtin.SourceLocation) void {
+pub fn emit(logger: t.Logger, item: LogItem, level: Level, msg: ?[*:0]const u8, src: std.lang.SourceLocation) void {
     if (logger.func) |func| {
         const text: ?[*:0]const u8 = msg orelse if (config.debug) message(item).ptr else null;
         const filename: ?[*:0]const u8 = if (config.debug) src.file.ptr else null;
-        func("sg", @intFromEnum(level), @intFromEnum(item), text, src.line, filename, logger.user_data);
+        func("sg", @backingInt(level), @backingInt(item), text, src.line, filename, logger.user_data);
     } else if (level == .panic) {
         @panic(message(item));
     }
 }
-
 
 /// Returns "ITEM_NAME: message" for a log item, matching the source debug messages.
 pub fn message(item: LogItem) [:0]const u8 {

@@ -3,8 +3,8 @@
 const std = @import("std");
 const t = @import("types.zig");
 const e = @import("enums.zig");
-const config = @import("config.zig");
-const formats = @import("formats.zig");
+pub const config = @import("config.zig");
+pub const formats = @import("formats.zig");
 const log_ = @import("log.zig");
 const pool = @import("pool.zig");
 const backend = @import("backend.zig");
@@ -15,7 +15,7 @@ pub const Pool = pool.Pool;
 
 pub const num_pixel_formats = blk: {
     var max: u32 = 0;
-    for (@typeInfo(e.PixelFormat).@"enum".fields) |field| max = @max(max, field.value);
+    for (@typeInfo(e.PixelFormat).@"enum".field_values) |value| max = @max(max, value);
     break :blk max + 1;
 };
 pub const max_uniformblock_bindslots = 8;
@@ -137,6 +137,9 @@ pub fn Native(comptime Desc: type) type {
         none: void,
         gl: @import("backends/gl/resources.zig").Resource(Desc),
         d3d11: @import("backends/d3d11/resources.zig").Resource(Desc),
+        vulkan: @import("backends/vulkan/resources.zig").Resource(Desc),
+        wgpu: @import("backends/wgpu/resources.zig").Resource(Desc),
+        metal: @import("backends/metal/resources.zig").Resource(Desc),
     };
 }
 
@@ -479,15 +482,15 @@ pub fn isDualSourceBlendFactor(f: e.BlendFactor) bool {
 }
 
 pub fn isValidAttachmentColorFormat(fmt: e.PixelFormat) bool {
-    const info = state().formats[@intFromEnum(fmt)];
+    const info = state().formats[@backingInt(fmt)];
     return info.render and !info.depth;
 }
 pub fn isValidAttachmentDepthFormat(fmt: e.PixelFormat) bool {
-    const info = state().formats[@intFromEnum(fmt)];
+    const info = state().formats[@backingInt(fmt)];
     return info.render and info.depth;
 }
 pub fn isValidStorageImageFormat(fmt: e.PixelFormat) bool {
-    const info = state().formats[@intFromEnum(fmt)];
+    const info = state().formats[@backingInt(fmt)];
     return info.read or info.write;
 }
 pub fn isDepthOrDepthStencilFormat(fmt: e.PixelFormat) bool {

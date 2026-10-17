@@ -807,6 +807,10 @@ pub const D3d11Environment = struct {
 };
 pub const WgpuEnvironment = struct {
     device: ?*const anyopaque = null,
+    /// Resolves webgpu.h functions by name, typically `wgpuGetProcAddress` of
+    /// the WebGPU implementation (Dawn, wgpu-native or the browser shim).
+    get_proc_address: ?*const fn (name: [:0]const u8, user_data: ?*anyopaque) ?*const anyopaque = null,
+    user_data: ?*anyopaque = null,
 };
 pub const VulkanEnvironment = struct {
     instance: ?*const anyopaque = null,
@@ -814,6 +818,9 @@ pub const VulkanEnvironment = struct {
     device: ?*const anyopaque = null,
     queue: ?*const anyopaque = null,
     queue_family_index: u32 = 0,
+    /// `vkGetInstanceProcAddr` of the Vulkan loader that created `instance`;
+    /// every other Vulkan function is resolved through it.
+    get_instance_proc_addr: ?*const anyopaque = null,
 };
 pub const GlEnvironment = struct {
     /// Resolve driver symbols from the application's current GL/GLES context.

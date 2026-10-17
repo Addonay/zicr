@@ -63,10 +63,6 @@ pub fn Pool(comptime T: type) type {
             self.* = undefined;
         }
 
-        pub fn size(self: *const Self) usize {
-            return self.items.len;
-        }
-
         /// Allocates a slot and returns its new id, or null if the pool is exhausted.
         pub fn alloc(self: *Self) ?u32 {
             if (self.queue_top == 0) return null;

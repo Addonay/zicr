@@ -57,7 +57,7 @@ fn multiple(val: i32, of: i32) bool {
 }
 
 fn formatInfo(fmt: e.PixelFormat) t.PixelformatInfo {
-    const index = @intFromEnum(fmt);
+    const index = @backingInt(fmt);
     std.debug.assert(index < core.num_pixel_formats);
     return core.state().formats[index];
 }
@@ -684,7 +684,7 @@ pub fn beginPass(pass: *const t.Pass) bool {
         v.check(sc.width > 0, .validate_beginpass_swapchain_expect_width);
         v.check(sc.height > 0, .validate_beginpass_swapchain_expect_height);
         v.check(sc.sample_count > 0, .validate_beginpass_swapchain_expect_samplecount);
-        v.check(@intFromEnum(sc.color_format) > @intFromEnum(e.PixelFormat.none), .validate_beginpass_swapchain_expect_colorformat);
+        v.check(@backingInt(sc.color_format) > @backingInt(e.PixelFormat.none), .validate_beginpass_swapchain_expect_colorformat);
         // NOTE: the depth buffer is optional, and the GL framebuffer handle may be 0
         if (isMetal(backend)) {
             v.check(sc.metal.current_drawable != null, .validate_beginpass_swapchain_metal_expect_currentdrawable);

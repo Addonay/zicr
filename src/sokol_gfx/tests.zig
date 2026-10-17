@@ -5,17 +5,19 @@ const formats = @import("formats.zig");
 const Pool = @import("pool.zig").Pool;
 
 test "generational slots reject stale handles after reuse and reinitialization" {
-    var pool = try Pool(gfx.BufferDesc).init(std.testing.allocator, 1);
+    const core = @import("core.zig");
+    var pool = try Pool(core.Buffer).init(std.testing.allocator, 1);
     defer pool.deinit(std.testing.allocator);
-    const first = pool.alloc();
+    const first = pool.alloc().?;
     try std.testing.expectEqual(@as(u32, 0x10001), first);
-    try std.testing.expectEqual(@as(u32, 0), pool.alloc());
-    pool.lookup(first).?.slot.state = .valid;
-    try std.testing.expect(pool.uninit(first));
+    try std.testing.expectEqual(@as(?u32, null), pool.alloc());
+    const res = pool.lookup(first).?;
+    res.slot.state = .valid;
+    core.resetToAllocState(res);
     try std.testing.expectEqual(@as(u32, 1), pool.lookup(first).?.slot.uninit_count);
-    try std.testing.expect(pool.dealloc(first));
-    try std.testing.expect(!pool.dealloc(first));
-    const second = pool.alloc();
+    pool.free(res);
+    try std.testing.expectEqual(@as(u32, 1), pool.numFree());
+    const second = pool.alloc().?;
     try std.testing.expectEqual(@as(u32, 0x20001), second);
     try std.testing.expect(pool.lookup(first) == null);
     try std.testing.expect(pool.lookup(0xffff) == null);
@@ -50,6 +52,8 @@ test "compressed texture pitches cover partial blocks and row alignment" {
 }
 
 test "dummy lifecycle validates descriptors and preserves slot identity through uninit" {
+    // validation is compiled out without the debug option, like SOKOL_DEBUG
+    if (!@import("config.zig").debug) return error.SkipZigTest;
     try gfx.setup(std.testing.allocator, .dummy, .{ .buffer_pool_size = 1 });
     defer gfx.shutdown();
     try std.testing.expect(gfx.isValid());
@@ -70,8 +74,12 @@ test "dummy lifecycle validates descriptors and preserves slot identity through 
     try std.testing.expectEqual(@as(u32, 2), stats.total.buffers.allocated);
 }
 
-test "setup reports unsupported GPU backends without creating state" {
-    try std.testing.expectError(error.BackendNotPorted, gfx.setup(std.testing.allocator, .vulkan, .{}));
+test "setup reports missing GPU environments and unknown backends without creating state" {
+    try std.testing.expectError(error.MissingVulkanLoader, gfx.setup(std.testing.allocator, .vulkan, .{}));
+    try std.testing.expect(!gfx.isValid());
+    try std.testing.expectError(error.MissingWgpuDevice, gfx.setup(std.testing.allocator, .wgpu, .{ .environment = .{ .defaults = .{ .color_format = .bgra8 } } }));
+    try std.testing.expect(!gfx.isValid());
+    try std.testing.expectError(error.BackendNotPorted, gfx.setup(std.testing.allocator, @fromBackingInt(@intCast(99)), .{}));
     try std.testing.expect(!gfx.isValid());
 }
 
@@ -180,6 +188,8 @@ test "render commands trace in order and frame statistics advance at commit" {
 }
 
 test "shader validation rejects missing texture pairs and mismatched sampler kinds" {
+    // validation is compiled out without the debug option, like SOKOL_DEBUG
+    if (!@import("config.zig").debug) return error.SkipZigTest;
     try gfx.setup(std.testing.allocator, .dummy, .{});
     defer gfx.shutdown();
     var desc: gfx.ShaderDesc = .{};
@@ -198,6 +208,8 @@ test "shader validation rejects missing texture pairs and mismatched sampler kin
 }
 
 test "failed initialization and allocated slots expose empty common resource data" {
+    // validation is compiled out without the debug option, like SOKOL_DEBUG
+    if (!@import("config.zig").debug) return error.SkipZigTest;
     try gfx.setup(std.testing.allocator, .dummy, .{});
     defer gfx.shutdown();
     const allocated = gfx.allocBuffer();
@@ -212,6 +224,8 @@ test "failed initialization and allocated slots expose empty common resource dat
 }
 
 test "view ranges use source defaults and validate attachment mip levels" {
+    // validation is compiled out without the debug option, like SOKOL_DEBUG
+    if (!@import("config.zig").debug) return error.SkipZigTest;
     try gfx.setup(std.testing.allocator, .dummy, .{});
     defer gfx.shutdown();
     const image = gfx.makeImage(.{ .width = 32, .height = 32, .num_mipmaps = 3, .usage = .{ .write_unsealed = true } });
@@ -224,6 +238,8 @@ test "view ranges use source defaults and validate attachment mip levels" {
 }
 
 test "pipeline rejects unsupported attribute and invalid depth-only state" {
+    // validation is compiled out without the debug option, like SOKOL_DEBUG
+    if (!@import("config.zig").debug) return error.SkipZigTest;
     try gfx.setup(std.testing.allocator, .dummy, .{});
     defer gfx.shutdown();
     const shader = gfx.makeShader(.{});
@@ -256,6 +272,8 @@ const LogEvents = struct {
 };
 
 test "bindings reject wrong view kinds and sampling an active render attachment" {
+    // validation is compiled out without the debug option, like SOKOL_DEBUG
+    if (!@import("config.zig").debug) return error.SkipZigTest;
     var events: LogEvents = .{};
     try gfx.setup(std.testing.allocator, .dummy, .{ .logger = .{ .func = LogEvents.callback, .user_data = &events } });
     defer gfx.shutdown();
@@ -291,6 +309,8 @@ test "bindings reject wrong view kinds and sampling an active render attachment"
 }
 
 test "missing transient writes are diagnosed at draw and recover after the next frame upload" {
+    // validation is compiled out without the debug option, like SOKOL_DEBUG
+    if (!@import("config.zig").debug) return error.SkipZigTest;
     var events: LogEvents = .{};
     try gfx.setup(std.testing.allocator, .dummy, .{ .logger = .{ .func = LogEvents.callback, .user_data = &events } });
     defer gfx.shutdown();
@@ -341,4 +361,115 @@ test "GL setup failure unwinds all pools and never leaves a dummy context behind
 
 test {
     _ = @import("backends/d3d11/tests.zig");
+}
+
+const MessageLog = struct {
+    last: [128]u8 = @splat(0),
+    fn callback(_: ?[*:0]const u8, level: u32, _: u32, message: ?[*:0]const u8, _: u32, _: ?[*:0]const u8, user_data: ?*anyopaque) void {
+        const self: *MessageLog = @ptrCast(@alignCast(user_data.?));
+        if (level != 1) return;
+        const text = std.mem.span(message orelse return);
+        const n = @min(text.len, self.last.len - 1);
+        @memcpy(self.last[0..n], text[0..n]);
+        self.last[n] = 0;
+    }
+};
+
+test "debug builds pass the source log message text to the logger" {
+    if (!@import("config.zig").debug) return error.SkipZigTest;
+    var log: MessageLog = .{};
+    try gfx.setup(std.testing.allocator, .dummy, .{ .logger = .{ .func = MessageLog.callback, .user_data = &log } });
+    defer gfx.shutdown();
+    _ = gfx.makeBuffer(.{ .usage = .{ .vertex_buffer = true } });
+    try std.testing.expect(std.mem.startsWith(u8, std.mem.sliceTo(&log.last, 0), "VALIDATE_BUFFERDESC_EXPECT_DATA: sg_buffer_desc: buffer content can never be initialized"));
+}
+
+test "begin pass validation diagnoses offscreen attachment mismatches and swapchain leftovers" {
+    // validation is compiled out without the debug option, like SOKOL_DEBUG
+    if (!@import("config.zig").debug) return error.SkipZigTest;
+    var events: LogEvents = .{};
+    try gfx.setup(std.testing.allocator, .dummy, .{ .logger = .{ .func = LogEvents.callback, .user_data = &events } });
+    defer gfx.shutdown();
+    const big = gfx.makeImage(.{ .width = 16, .height = 16, .usage = .{ .color_attachment = true } });
+    const small = gfx.makeImage(.{ .width = 8, .height = 8, .usage = .{ .color_attachment = true } });
+    var pass: gfx.Pass = .{};
+    pass.attachments.colors[0] = gfx.makeView(.{ .color_attachment = .{ .image = big } });
+    pass.attachments.colors[2] = gfx.makeView(.{ .color_attachment = .{ .image = small } });
+    pass.swapchain.width = 4;
+    gfx.beginPass(pass);
+    try std.testing.expect(events.contains(.validate_beginpass_colorattachmentviews_continuous));
+    try std.testing.expect(events.contains(.validate_beginpass_colorattachmentview_sizes));
+    try std.testing.expect(events.contains(.validate_beginpass_swapchain_expect_width_notset));
+    try std.testing.expectEqual(gfx.PassState.render, gfx.queryPassState());
+    gfx.endPass();
+    try std.testing.expectEqual(gfx.PassState.none, gfx.queryPassState());
+    events.count = 0;
+    gfx.beginPass(.{ .swapchain = .{ .width = 8 } });
+    try std.testing.expect(events.contains(.validate_beginpass_swapchain_expect_height));
+    gfx.endPass();
+}
+
+test "apply pipeline and uniforms validate against the pass and shader" {
+    // validation is compiled out without the debug option, like SOKOL_DEBUG
+    if (!@import("config.zig").debug) return error.SkipZigTest;
+    var events: LogEvents = .{};
+    try gfx.setup(std.testing.allocator, .dummy, .{ .logger = .{ .func = LogEvents.callback, .user_data = &events } });
+    defer gfx.shutdown();
+    var shader_desc: gfx.ShaderDesc = .{};
+    shader_desc.uniform_blocks[0] = .{ .stage = .vertex, .size = 16 };
+    const shader = gfx.makeShader(shader_desc);
+    const pipeline = gfx.makePipeline(.{ .shader = shader, .colors = .{ .{ .pixel_format = .r8 }, .{}, .{}, .{}, .{}, .{}, .{}, .{} } });
+    try std.testing.expectEqual(gfx.ResourceState.valid, gfx.queryPipelineState(pipeline));
+    gfx.beginPass(.{ .swapchain = .{ .width = 8, .height = 8 } });
+    gfx.applyPipeline(pipeline);
+    try std.testing.expect(events.contains(.validate_apip_swapchain_color_format));
+    events.count = 0;
+    // a rejected pipeline is not applied, so uniforms have no pipeline
+    const value = [_]f32{ 1, 2 };
+    gfx.applyUniforms(0, gfx.Range.fromSlice(f32, &value));
+    try std.testing.expect(events.contains(.validate_au_no_pipeline));
+    gfx.endPass();
+    events.count = 0;
+    const matching = gfx.makePipeline(.{ .shader = shader });
+    gfx.beginPass(.{ .swapchain = .{ .width = 8, .height = 8 } });
+    gfx.applyPipeline(matching);
+    try std.testing.expectEqual(@as(usize, 0), events.count);
+    gfx.applyUniforms(0, gfx.Range.fromSlice(f32, &value));
+    try std.testing.expect(events.contains(.validate_au_size));
+    gfx.draw(0, 3, 1);
+    gfx.endPass();
+    events.count = 0;
+    gfx.beginPass(.{ .compute = true });
+    gfx.applyViewport(0, 0, 4, 4, true);
+    try std.testing.expect(events.contains(.validate_avp_renderpass_expected));
+    gfx.dispatch(1, 1, 1);
+    gfx.endPass();
+}
+
+test "copies are rejected inside passes and sealing requires the unsealed state" {
+    // validation is compiled out without the debug option, like SOKOL_DEBUG
+    if (!@import("config.zig").debug) return error.SkipZigTest;
+    var events: LogEvents = .{};
+    try gfx.setup(std.testing.allocator, .dummy, .{ .logger = .{ .func = LogEvents.callback, .user_data = &events } });
+    defer gfx.shutdown();
+    const src = gfx.makeBuffer(.{ .size = 16, .usage = .{ .copy_src = true, .write_transient = true } });
+    const dst = gfx.makeBuffer(.{ .size = 16, .usage = .{ .copy_dst = true } });
+    gfx.beginPass(.{ .swapchain = .{ .width = 8, .height = 8 } });
+    gfx.copyBufferToBuffer(.{ .src = .{ .buffer = src }, .dst = .{ .buffer = dst }, .size = 32 });
+    try std.testing.expect(events.contains(.validate_copybuffertobuffer_inside_pass));
+    try std.testing.expect(events.contains(.validate_copybuffertobuffer_src_overflow));
+    gfx.endPass();
+    events.count = 0;
+    gfx.sealBuffer(dst);
+    try std.testing.expect(events.contains(.validate_sealbuffer_resourcestate));
+    gfx.sealBuffer(.{ .id = 12345 });
+    try std.testing.expect(events.contains(.seal_buffer_alive));
+    const image = gfx.makeImage(.{ .width = 4, .height = 4, .usage = .{ .write_unsealed = true } });
+    try std.testing.expectEqual(gfx.ResourceState.unsealed, gfx.queryImageState(image));
+    const pixels: [64]u8 = @splat(0);
+    events.count = 0;
+    gfx.writeImageUnsealed(.{ .src = .{ .data = gfx.Range.fromSlice(u8, &pixels) }, .dst = .{ .image = image, .x = 2 }, .size = .{ .width = 4 } });
+    try std.testing.expect(events.contains(.validate_writeimage_write_width_overflow));
+    gfx.sealImage(image);
+    try std.testing.expectEqual(gfx.ResourceState.valid, gfx.queryImageState(image));
 }

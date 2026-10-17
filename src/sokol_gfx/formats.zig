@@ -37,7 +37,7 @@ pub fn vertexSize(format: enums.VertexFormat) i32 {
     };
 }
 
-pub fn vertexName(format: enums.VertexFormat) []const u8 {
+pub fn vertexName(format: enums.VertexFormat) [:0]const u8 {
     return switch (format) {
         .float => "FLOAT",
         .float2 => "FLOAT2",
@@ -71,7 +71,7 @@ pub fn vertexName(format: enums.VertexFormat) []const u8 {
     };
 }
 
-pub fn shaderAttrBaseTypeName(format: enums.ShaderAttrBaseType) []const u8 {
+pub fn shaderAttrBaseTypeName(format: enums.ShaderAttrBaseType) [:0]const u8 {
     return switch (format) {
         .undefined => "UNDEFINED",
         .float => "FLOAT",
