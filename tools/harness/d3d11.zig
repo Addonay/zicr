@@ -5,8 +5,10 @@ const gpu = @import("zicr").gpu;
 const harness = @import("harness.zig");
 const sdk = gpu.raw.native.d3d11;
 const Library = gpu.raw.native.WindowsLibrary;
+const Window = @import("dxgi_window.zig").Window;
 
 pub const Context = struct {
+    window: ?Window = null,
     gpa: std.mem.Allocator,
     library: Library,
     device: *sdk.Object,
@@ -31,15 +33,41 @@ pub const Context = struct {
             name = "WARP";
         }
         if (status < 0 or device == null or context == null) return error.DeviceCreationFailed;
+        errdefer sdk.release(context);
+        errdefer sdk.release(device);
+        const adapter_name = gpu.raw.native.dxgi.describeD3D11Device(gpa, device.?) catch try gpa.dupe(u8, name);
+        errdefer gpa.free(adapter_name);
         const self = try gpa.create(Context);
-        self.* = .{ .gpa = gpa, .library = library, .device = device.?, .context = context.?, .name = name };
+        self.* = .{ .gpa = gpa, .library = library, .device = device.?, .context = context.?, .name = adapter_name };
         return self;
     }
 
+    pub fn createBenchmark(gpa: std.mem.Allocator, variant: harness.Variant) !*Context {
+        return create(gpa, variant);
+    }
+    pub fn createWindow(gpa: std.mem.Allocator, variant: harness.Variant) !*Context {
+        const self = try create(gpa, variant);
+        errdefer self.destroy();
+        self.window = try Window.create(self.device, self.context, false);
+        return self;
+    }
+
+    pub fn acquireSwapchain(self: *Context) !gpu.Swapchain {
+        if (self.window) |*window| return window.acquire();
+        return error.NoWindow;
+    }
+
+    pub fn present(self: *Context, verify: bool) !void {
+        if (self.window) |*window| return window.present(verify);
+        return error.NoWindow;
+    }
+
     pub fn destroy(self: *Context) void {
+        if (self.window) |*window| window.deinit();
         sdk.release(self.context);
         sdk.release(self.device);
         self.library.close();
+        self.gpa.free(self.name);
         self.gpa.destroy(self);
     }
 
@@ -47,6 +75,9 @@ pub const Context = struct {
         return .{ .backend = .{ .d3d11 = .{ .device = self.device, .device_context = self.context } } };
     }
 
+    pub fn validationAvailable(_: *Context) bool {
+        return false;
+    }
     pub fn description(self: *Context) []const u8 {
         return self.name;
     }

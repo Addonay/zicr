@@ -1,7 +1,7 @@
 //! Functional COM device double for native resource ownership and failure tests.
 const std = @import("std");
 const sdk = @import("sdk.zig");
-const c = @import("constants.zig");
+const c = @import("../dxgi/constants.zig");
 
 pub const Kind = enum(u32) { device, context, buffer, image, sampler, shader, layout, rasterizer, depth, blend, view, blob };
 const NativeObject = extern struct {

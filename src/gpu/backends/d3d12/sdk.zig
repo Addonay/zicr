@@ -3,16 +3,16 @@
 //! Object, GUID, invoke and blob access are shared with the D3D11 backend.
 const std = @import("std");
 const builtin = @import("builtin");
-const d3d11 = @import("../d3d11/sdk.zig");
+const com = @import("../dxgi/com.zig");
 
-pub const call_conv = d3d11.call_conv;
-pub const Object = d3d11.Object;
-pub const Guid = d3d11.Guid;
-pub const invoke = d3d11.invoke;
-pub const addRef = d3d11.addRef;
-pub const release = d3d11.release;
-pub const getBufferPointer = d3d11.getBufferPointer;
-pub const getBufferSize = d3d11.getBufferSize;
+pub const call_conv = com.call_conv;
+pub const Object = com.Object;
+pub const Guid = com.Guid;
+pub const invoke = com.invoke;
+pub const addRef = com.addRef;
+pub const release = com.release;
+pub const getBufferPointer = com.getBufferPointer;
+pub const getBufferSize = com.getBufferSize;
 
 pub const Handle = ?*anyopaque;
 pub const CpuHandle = usize;
@@ -256,6 +256,37 @@ pub const RootSignatureDesc = extern struct {
     static_samplers: ?*const anyopaque = null,
     flags: u32 = 0,
 };
+
+/// Root signature 1.1 structures, matching d3d12.h without a C dependency.
+pub const RootDescriptorRange1 = extern struct {
+    range_type: u32 = 0,
+    num_descriptors: u32 = 0,
+    base_shader_register: u32 = 0,
+    register_space: u32 = 0,
+    flags: u32 = 0,
+    offset_in_descriptors_from_table_start: u32 = 0,
+};
+pub const RootParameter1 = extern struct {
+    parameter_type: u32 = 0,
+    payload: extern union {
+        table: extern struct { num_ranges: u32 = 0, ranges: ?[*]const RootDescriptorRange1 = null },
+        constants: extern struct { shader_register: u32, register_space: u32, num_values: u32 },
+        descriptor: extern struct { shader_register: u32 = 0, register_space: u32 = 0, flags: u32 = 0 },
+    } = .{ .descriptor = .{} },
+    shader_visibility: u32 = 0,
+};
+pub const RootSignatureDesc1 = extern struct {
+    num_parameters: u32 = 0,
+    parameters: ?[*]const RootParameter1 = null,
+    num_static_samplers: u32 = 0,
+    static_samplers: ?*const anyopaque = null,
+    flags: u32 = 0,
+};
+pub const VersionedRootSignatureDesc = extern struct {
+    version: u32 = 2, // D3D_ROOT_SIGNATURE_VERSION_1_1
+    payload: extern union { v1_0: RootSignatureDesc, v1_1: RootSignatureDesc1 },
+};
+pub const VersionedRootSignatureSerializeFn = *const fn (*const VersionedRootSignatureDesc, *?*Object, *?*Object) callconv(call_conv) i32;
 
 pub const FormatSupport = extern struct { format: u32 = 0, support1: u32 = 0, support2: u32 = 0 };
 
@@ -574,3 +605,15 @@ pub fn fromOpaque(pointer: *const anyopaque) *Object {
 
 pub const RootSignatureSerializeFn = *const fn (*const RootSignatureDesc, u32, *?*Object, *?*Object) callconv(call_conv) i32;
 pub const GetDebugInterfaceFn = *const fn (*const Guid, *?*Object) callconv(call_conv) i32;
+
+// GUIDs and method slots from the pinned Windows SDK's d3d12sdklayers.h/d3d12.h.
+pub const iid_debug1: Guid = .{ .data1 = 0xaffaa4ca, .data2 = 0x63fe, .data3 = 0x4d8e, .data4 = .{ 0xb8, 0xad, 0x15, 0x90, 0x00, 0xaf, 0x43, 0x04 } };
+pub const iid_dred_settings: Guid = .{ .data1 = 0x82bc481c, .data2 = 0x6b9b, .data3 = 0x4030, .data4 = .{ 0xae, 0xdb, 0x7e, 0xe3, 0xd1, 0xdf, 0x1e, 0x63 } };
+pub fn debugEnableGpuValidation(object: *Object) void {
+    invoke(4, *const fn (*Object, i32) callconv(call_conv) void, object, .{1});
+    invoke(5, *const fn (*Object, i32) callconv(call_conv) void, object, .{1});
+}
+pub fn enableDred(object: *Object) void {
+    invoke(3, *const fn (*Object, u32) callconv(call_conv) void, object, .{2});
+    invoke(4, *const fn (*Object, u32) callconv(call_conv) void, object, .{2});
+}

@@ -73,6 +73,7 @@ pub const Backend = struct {
     pub const readImage = commands.readImage;
 
     allocator: std.mem.Allocator,
+    loss: *std.atomic.Value(i32),
     valid: bool = false,
     /// macOS (`_SG_TARGET_MACOS`) rather than iOS or the simulator.
     macos: bool = false,
@@ -104,6 +105,7 @@ pub const Backend = struct {
         const macos = s.backend == .metal_macos;
         var self: Backend = .{
             .allocator = s.allocator,
+            .loss = &s.loss_code,
             .macos = macos,
             .ub_size = s.desc.uniform_buffer_size,
             .idpool = try IdPool.init(s.allocator, &s.desc),
@@ -140,6 +142,7 @@ pub const Backend = struct {
     /// Waits for the frames in flight and releases every object (_sg_mtl_discard_backend).
     pub fn deinit(self: *Backend) void {
         std.debug.assert(self.valid);
+        if (self.cmd_buffer != null) self.commit();
         // wait for the last frame to finish, then give the semaphore back
         for (0..num_inflight) |_| sdk.semaphoreWait(self.sem);
         for (0..num_inflight) |_| sdk.semaphoreSignal(self.sem);
@@ -213,6 +216,16 @@ pub const Backend = struct {
         const res = &buf.native.metal;
         std.debug.assert(buf.cmn.size > 0);
         const options = self.bufferResourceOptions(&buf.cmn.usage);
+        // macOS blit buffer copies need four-byte aligned spans. Keep the public
+        // logical size while padding backing storage, including odd byte buffers.
+        const native_size = (std.math.add(usize, buf.cmn.size, 3) catch return .failed) & ~@as(usize, 3);
+        var padded: ?[]u8 = null;
+        defer if (padded) |bytes| self.allocator.free(bytes);
+        if (desc.data.ptr != null and native_size != buf.cmn.size) {
+            padded = self.allocator.alloc(u8, native_size) catch return .failed;
+            @memcpy(padded.?[0..buf.cmn.size], @as([*]const u8, @ptrCast(desc.data.ptr.?))[0..buf.cmn.size]);
+            @memset(padded.?[buf.cmn.size..], 0);
+        }
         for (0..@intCast(buf.cmn.num_slots)) |slot| {
             var mtl_buf: sdk.Id = null;
             if (desc.mtl_buffer) |injected| {
@@ -221,9 +234,9 @@ pub const Backend = struct {
             } else {
                 if (desc.data.ptr) |bytes| {
                     std.debug.assert(desc.data.size > 0);
-                    mtl_buf = sdk.msg(sdk.Id, self.mtl_device, "newBufferWithBytes:length:options:", .{ bytes, buf.cmn.size, options });
+                    mtl_buf = sdk.msg(sdk.Id, self.mtl_device, "newBufferWithBytes:length:options:", .{ if (padded) |copy| @as(*const anyopaque, copy.ptr) else bytes, native_size, options });
                 } else {
-                    mtl_buf = sdk.msg(sdk.Id, self.mtl_device, "newBufferWithLength:options:", .{ buf.cmn.size, options });
+                    mtl_buf = sdk.msg(sdk.Id, self.mtl_device, "newBufferWithLength:options:", .{ native_size, options });
                 }
                 if (mtl_buf == null) {
                     core.logError(.metal_create_buffer_failed);

@@ -341,7 +341,10 @@ test "missing transient writes are diagnosed at draw and recover after the next 
 }
 
 test "GL setup failure unwinds all pools and never leaves a dummy context behind" {
-    try std.testing.expectError(error.MissingGlProcAddress, gfx.setup(std.testing.allocator, .glcore, .{}));
+    // Windows supplies a built-in opengl32 loader, but this test has no GL
+    // context. Other hosts require the application to supply the loader.
+    const missing_loader = if (@import("builtin").os.tag == .windows) error.MissingOpenGlFunction else error.MissingGlProcAddress;
+    try std.testing.expectError(missing_loader, gfx.setup(std.testing.allocator, .glcore, .{}));
     try std.testing.expect(!gfx.isValid());
     try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
         fn resolve(_: [:0]const u8, _: ?*anyopaque) ?*const anyopaque {
@@ -472,4 +475,76 @@ test "copies are rejected inside passes and sealing requires the unsealed state"
     try std.testing.expect(events.contains(.validate_writeimage_write_width_overflow));
     gfx.sealImage(image);
     try std.testing.expectEqual(gfx.ResourceState.valid, gfx.queryImageState(image));
+}
+
+test "WebGPU mapping callback owns abandoned tickets and reports mapping failures" {
+    const sdk = @import("backends/wgpu/sdk.zig");
+    const Pending = @import("backends/wgpu/readback.zig").Pending;
+    const Fake = struct {
+        var callback: sdk.BufferMapCallbackInfo = .{};
+        var released: u32 = 0;
+        var unmapped: u32 = 0;
+        fn map(_: ?sdk.Buffer, _: u64, _: usize, _: usize, cb: sdk.BufferMapCallbackInfo) callconv(.c) sdk.Future {
+            callback = cb;
+            return .{ .id = 1 };
+        }
+        fn release(_: ?sdk.Buffer) callconv(.c) void {
+            released += 1;
+        }
+        fn unmap(_: ?sdk.Buffer) callconv(.c) void {
+            unmapped += 1;
+        }
+    };
+    Fake.released = 0;
+    Fake.unmapped = 0;
+    var procs: sdk.Procs = undefined;
+    procs.wgpuBufferMapAsync = Fake.map;
+    procs.wgpuBufferRelease = Fake.release;
+    procs.wgpuBufferUnmap = Fake.unmap;
+    const allocator = std.testing.allocator;
+    var borrowed: [4]u8 = @splat(0xA5);
+    for ([_]bool{ true, false }) |owns_data| for ([_]u32{ 1, 5 }) |status| {
+        const pending = try allocator.create(Pending);
+        pending.* = .{ .allocator = allocator, .procs = procs, .device = @ptrFromInt(1), .device_poll = null, .buffer = @ptrFromInt(1), .mapped_size = 4, .data = if (owns_data) try allocator.alloc(u8, 4) else &borrowed, .owns_data = owns_data };
+        pending.start();
+        try std.testing.expectEqual(@as(?[]const u8, null), try pending.poll());
+        // Drop the client while the driver still holds userdata. Completion must
+        // release it once, not touch freed memory or leak the output allocation.
+        pending.release();
+        Fake.callback.callback.?(status, .{}, Fake.callback.userdata1, null);
+        try std.testing.expectEqual([4]u8{ 0xA5, 0xA5, 0xA5, 0xA5 }, borrowed);
+    };
+    try std.testing.expectEqual(@as(u32, 4), Fake.released);
+    try std.testing.expectEqual(@as(u32, 2), Fake.unmapped);
+}
+
+test "D3D12 failed fence event registration cannot retire unfinished work" {
+    const sdk = @import("backends/d3d12/sdk.zig");
+    const Fake = struct {
+        vtable: *const [10]?*const anyopaque,
+        value: u64 = 0,
+        registrations: u32 = 0,
+        fn completed(object: *sdk.Object) callconv(sdk.call_conv) u64 {
+            const self: *@This() = @ptrCast(@alignCast(object));
+            return self.value;
+        }
+        fn register(object: *sdk.Object, target: u64, _: sdk.Handle) callconv(sdk.call_conv) i32 {
+            const self: *@This() = @ptrCast(@alignCast(object));
+            self.registrations += 1;
+            if (self.registrations < 3) return -1;
+            self.value = target;
+            return 0;
+        }
+    };
+    var functions: [10]?*const anyopaque = @splat(null);
+    functions[8] = @ptrCast(&Fake.completed);
+    functions[9] = @ptrCast(&Fake.register);
+    var fence: Fake = .{ .vtable = &functions };
+    @import("backends/d3d12/memory.zig").waitFence(@ptrCast(&fence), null, 7);
+    try std.testing.expectEqual(@as(u32, 3), fence.registrations);
+    try std.testing.expectEqual(@as(u64, 7), fence.value);
+}
+
+test {
+    _ = @import("backends/vulkan/pipeline_cache.zig");
 }

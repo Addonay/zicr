@@ -18,6 +18,13 @@ pub const SetupError = backend.SetupError || error{ UseZigAllocator, InvalidPool
 /// allocator is used for all internal allocations until shutdown().
 pub fn setup(allocator: std.mem.Allocator, backend_kind: e.Backend, desc: t.Desc) SetupError!void {
     std.debug.assert(core.sg == null);
+    core.sg = .{ .allocator = allocator, .desc = desc, .pools = undefined, .backend = backend_kind, .commit_listeners = &.{} };
+    errdefer core.sg = null;
+    try initState(&core.sg.?, allocator, backend_kind, desc);
+}
+
+/// Initializes caller-owned device state; used by the Zig Device API.
+pub fn initState(s: *core.State, allocator: std.mem.Allocator, backend_kind: e.Backend, desc: t.Desc) SetupError!void {
     std.debug.assert(desc._start_canary == 0 and desc._end_canary == 0);
     if (desc.allocator.alloc_fn != null or desc.allocator.free_fn != null) return error.UseZigAllocator;
     const desc_def = defaults.desc(desc, backend_kind);
@@ -31,15 +38,17 @@ pub fn setup(allocator: std.mem.Allocator, backend_kind: e.Backend, desc: t.Desc
     const listeners = try allocator.alloc(t.CommitListener, @intCast(desc_def.max_commit_listeners));
     errdefer allocator.free(listeners);
     @memset(listeners, .{});
-    core.sg = .{
+    s.* = .{
         .allocator = allocator,
         .desc = desc_def,
         .pools = pools,
         .backend = backend_kind,
         .commit_listeners = listeners,
     };
-    errdefer core.sg = null;
-    try backend.setup(state());
+    const scope = core.enter(s);
+    defer scope.end();
+    try backend.setup(s);
+    s.desc.vulkan.pipeline_cache_data = .{}; // initialization-only borrowed bytes
     overridePortableLimits();
 }
 
@@ -55,12 +64,21 @@ fn overridePortableLimits() void {
 }
 
 pub fn shutdown() void {
-    const s = state();
+    deinitState(state());
+    core.sg = null;
+}
+
+/// Releases a caller-owned State without touching the raw singleton.
+pub fn deinitState(s: *core.State) void {
+    const scope = core.enter(s);
+    defer scope.end();
+    if (s.cur_pass.in_pass) endPass();
+    @import("readback_task.zig").collect(s, true);
+    s.readbacks.deinit(s.allocator);
     discardAllResources();
     backend.discard();
     s.allocator.free(s.commit_listeners);
     s.pools.deinit(s.allocator);
-    core.sg = null;
 }
 
 /// Releases the backend objects of every live resource; only valid at shutdown
@@ -76,7 +94,7 @@ fn discardAllResources() void {
 }
 
 pub fn isValid() bool {
-    return core.sg != null;
+    return core.current() != null;
 }
 pub fn queryDesc() t.Desc {
     return state().desc;
@@ -799,7 +817,7 @@ pub fn applyBindings(bindings: t.Bindings) void {
             } else s.next_draw_valid = false;
         }
     }
-    for (shd.cmn.views, bindings.views, 0..) |sv, b, i| {
+    for (&shd.cmn.views, &bindings.views, 0..) |sv, b, i| {
         if (sv.view_type == .invalid) continue;
         std.debug.assert(b.id != 0);
         const view = core.lookupView(b.id);
@@ -810,7 +828,7 @@ pub fn applyBindings(bindings: t.Bindings) void {
             if (!ref_valid) s.next_draw_valid = false;
         } else s.next_draw_valid = false;
     }
-    for (shd.cmn.samplers, bindings.samplers, 0..) |ss, b, i| {
+    for (&shd.cmn.samplers, &bindings.samplers, 0..) |ss, b, i| {
         if (ss.stage == .none) continue;
         std.debug.assert(b.id != 0);
         bnd.smps[i] = core.lookupSampler(b.id);
@@ -1080,16 +1098,16 @@ pub const ReadImageDesc = struct {
     bytes_per_slice: usize = 0,
 };
 
-/// Waits for all committed GPU work and copies a region of an image into
-/// `out`. Must be called outside of passes; the image needs `usage.copy_src`.
-pub fn readImage(desc: ReadImageDesc, out: []u8) bool {
+/// Resolves default image extents/pitches and validates a read destination.
+/// Shared by synchronous reads and owned readback requests; records no GPU work.
+pub fn resolveReadImage(desc: ReadImageDesc, size: usize) ?struct { image: *core.Image, region: core.ReadRegion } {
     const img = core.lookupImage(desc.image.id) orelse {
         core.logError(.read_image_alive);
-        return false;
+        return null;
     };
     if (img.slot.state != .valid) {
         core.logError(.read_image_valid);
-        return false;
+        return null;
     }
     const cmn = &img.cmn;
     var region: core.ReadRegion = .{
@@ -1112,8 +1130,14 @@ pub fn readImage(desc: ReadImageDesc, out: []u8) bool {
         if (region.bytes_per_row == 0 and region.width > 0) region.bytes_per_row = @intCast(formats.rowPitch(cmn.pixel_format, @intCast(region.width), 1));
         if (region.bytes_per_slice == 0) region.bytes_per_slice = region.bytes_per_row * region.height;
     }
-    if (!validation.readImage(img, &region, out.len)) return false;
-    if (backend.readImage(img, &region, out)) return true;
+    if (!validation.readImage(img, &region, size)) return null;
+    return .{ .image = img, .region = region };
+}
+
+/// Reads committed GPU work outside a pass into caller-owned memory.
+pub fn readImage(desc: ReadImageDesc, out: []u8) bool {
+    const resolved = resolveReadImage(desc, out.len) orelse return false;
+    if (backend.readImage(resolved.image, &resolved.region, out)) return true;
     core.logError(.read_image_failed);
     return false;
 }
@@ -1138,11 +1162,11 @@ fn native(comptime tag: anytype, res: anytype) ?*@FieldType(@FieldType(@TypeOf(r
 
 /// Returns the D3D11 device, or null if the D3D11 backend isn't active.
 pub fn d3d11Device() ?*const anyopaque {
-    const s = core.sg orelse return null;
+    const s = core.current() orelse return null;
     return if (s.impl == .d3d11) s.impl.d3d11.device else null;
 }
 pub fn d3d11DeviceContext() ?*const anyopaque {
-    const s = core.sg orelse return null;
+    const s = core.current() orelse return null;
     return if (s.impl == .d3d11) s.impl.d3d11.context else null;
 }
 pub fn d3d11QueryBufferInfo(buf_id: t.Buffer) t.D3d11BufferInfo {
@@ -1179,7 +1203,7 @@ pub fn d3d11QueryViewInfo(view_id: t.View) t.D3d11ViewInfo {
 }
 
 fn activeBackend(comptime tag: std.meta.Tag(backend.Impl)) ?*@FieldType(backend.Impl, @tagName(tag)) {
-    const s = if (core.sg) |*value| value else return null;
+    const s = core.current() orelse return null;
     return if (s.impl == tag) &@field(s.impl, @tagName(tag)) else null;
 }
 

@@ -31,65 +31,122 @@ const log_messages = @import("log.zig");
 /// exposed for tests and tooling only.
 pub const raw = internal;
 
+/// Freestanding wasm import resolvers used by browser hosts.
+pub const web = @import("web.zig");
+
+/// Storage and numeric interpretation of image texels.
 pub const PixelFormat = enums.PixelFormat;
+/// Element width of an index buffer, or no indexed drawing.
 pub const IndexType = enums.IndexType;
+/// Texture dimensionality: 2D, cube, 3D or array.
 pub const ImageType = enums.ImageType;
+/// Numeric type expected when a shader samples an image.
 pub const ImageSampleType = enums.ImageSampleType;
+/// Filtering or comparison behavior expected by a shader binding.
 pub const SamplerType = enums.SamplerType;
+/// How vertices or indices form points, lines or triangles.
 pub const PrimitiveType = enums.PrimitiveType;
+/// Nearest or linear filtering between texels or mip levels.
 pub const Filter = enums.Filter;
+/// How sampling addresses outside the image are handled.
 pub const Wrap = enums.Wrap;
+/// Fixed color returned by clamp-to-border sampling when supported.
 pub const BorderColor = enums.BorderColor;
+/// Memory encoding of one vertex attribute.
 pub const VertexFormat = enums.VertexFormat;
+/// Whether vertex data advances per vertex or per instance.
 pub const VertexStep = enums.VertexStep;
+/// Scalar, vector or matrix type in reflected uniform data.
 pub const UniformType = enums.UniformType;
+/// Alignment rules for reflected uniform blocks.
 pub const UniformLayout = enums.UniformLayout;
+/// Which triangle faces are discarded before rasterization.
 pub const CullMode = enums.CullMode;
+/// Vertex order that identifies a front-facing triangle.
 pub const FaceWinding = enums.FaceWinding;
+/// Comparison used by depth, stencil or comparison sampling.
 pub const CompareFunc = enums.CompareFunc;
+/// How a stencil value changes after a stencil/depth test.
 pub const StencilOp = enums.StencilOp;
+/// Multiplier applied to source or destination color during blending.
 pub const BlendFactor = enums.BlendFactor;
+/// Operation combining weighted source and destination colors.
 pub const BlendOp = enums.BlendOp;
+/// Color channels that a render target may write.
 pub const ColorMask = enums.ColorMask;
+/// Shader stage that consumes a reflected binding.
 pub const ShaderStage = enums.ShaderStage;
+/// Numeric class of a shader vertex input.
 pub const ShaderAttrBaseType = enums.ShaderAttrBaseType;
+/// Lifecycle state of a resource handle.
 pub const ResourceState = enums.ResourceState;
+/// Binding or attachment role of a resource view.
 pub const ViewType = enums.ViewType;
+/// Current pass recording and validation state.
 pub const PassState = enums.PassState;
+/// Stable identifier for a diagnostic; use it instead of matching message text.
 pub const LogItem = e.LogItem;
+/// Capabilities available to this Device; query before using optional behavior.
 pub const Features = t.Features;
+/// GPU API counters collected for one frame when statistics are enabled.
 pub const FrameStats = t.FrameStats;
+/// Collected frame counters and backend-specific statistics.
 pub const Stats = t.Stats;
 
+/// Maximum color attachment slots in one pass.
 pub const max_color_attachments = 8;
+/// Maximum vertex-buffer binding slots.
 pub const max_vertex_buffers = 8;
+/// Maximum attributes in a vertex-input layout.
 pub const max_vertex_attributes = 16;
+/// Maximum reflected uniform-block slots.
 pub const max_uniform_blocks = 8;
+/// Maximum shader resource-view slots.
 pub const max_views = 32;
+/// Maximum shader sampler slots.
 pub const max_samplers = 12;
+/// Maximum combined GLSL texture/sampler pair declarations.
 pub const max_texture_sampler_pairs = 32;
+/// Maximum mip levels described by one image.
 pub const max_mip_levels = 16;
+/// Maximum individually reflected GLSL uniforms per block.
 pub const max_uniform_block_members = 16;
 
 // ---------------------------------------------------------------- handles
 
 /// Typed, generation-checked resource handles; `.invalid` is never a live resource.
-pub const Buffer = enum(u32) { invalid = 0, _ };
-pub const Image = enum(u32) { invalid = 0, _ };
-pub const Sampler = enum(u32) { invalid = 0, _ };
-pub const Shader = enum(u32) { invalid = 0, _ };
-pub const Pipeline = enum(u32) { invalid = 0, _ };
-pub const View = enum(u32) { invalid = 0, _ };
+pub const Buffer = enum(u64) { invalid = 0, _ };
+/// Device-owned image handle. The invalid value never names a live resource.
+pub const Image = enum(u64) { invalid = 0, _ };
+/// Device-owned sampler-state handle.
+pub const Sampler = enum(u64) { invalid = 0, _ };
+/// Device-owned shader and reflected binding-interface handle.
+pub const Shader = enum(u64) { invalid = 0, _ };
+/// Device-owned render or compute pipeline handle.
+pub const Pipeline = enum(u64) { invalid = 0, _ };
+/// Device-owned resource binding or attachment-view handle.
+pub const View = enum(u64) { invalid = 0, _ };
 
 fn id(handle: anytype) u32 {
-    return @backingInt(handle);
+    const value = @backingInt(handle);
+    if (value == 0) return 0;
+    if (value >> 32 != ctx().identity) return 0;
+    return @truncate(value);
+}
+
+fn ownedHandle(comptime H: type, raw_id: u32) H {
+    if (raw_id == 0) return .invalid;
+    return @fromBackingInt((@as(u64, ctx().identity) << 32) | raw_id);
 }
 
 // ---------------------------------------------------------------- device setup
 
+/// Graphics API selected for a Device; dummy is intended for tests.
 pub const Backend = enum { dummy, vulkan, d3d12, d3d11, metal, wgpu, gl, gles };
 
+/// Diagnostic delivered synchronously while an API operation is validated or executed.
 pub const Diagnostic = struct {
+    /// Severity of a diagnostic message.
     pub const Level = enum { panic, err, warn, info };
     item: LogItem,
     level: Level,
@@ -97,9 +154,20 @@ pub const Diagnostic = struct {
     message: ?[]const u8,
 };
 
+/// Native removal/context-loss code and the identity of the affected Device.
+pub const DeviceLoss = struct { device_id: u32, backend: Backend, native_code: i32 };
+/// Ready state or the first recorded native device-loss condition.
+pub const DeviceStatus = union(enum) { ready, lost: DeviceLoss };
+
+/// Caller-owned native handles and loader callbacks for the selected graphics API.
 pub const BackendOptions = union(Backend) {
     /// A backend without a GPU; every operation succeeds and does nothing.
     dummy,
+    /// Native device creation must enable dynamic rendering, synchronization2
+    /// and buffer device address. Enable supported independentBlend, dualSrcBlend,
+    /// samplerAnisotropy and extended storage-image features when using those
+    /// operations. Capability queries cannot recover a native device's enabled
+    /// feature chain; tools/harness/vulkan.zig shows the creation contract.
     vulkan: struct {
         /// `vkGetInstanceProcAddr` of the loader that created `instance`.
         get_instance_proc_addr: *const anyopaque,
@@ -108,6 +176,17 @@ pub const BackendOptions = union(Backend) {
         device: *const anyopaque,
         queue: *const anyopaque,
         queue_family_index: u32,
+        /// Initialization-only serialized cache. Incompatible driver/UUID data
+        /// is ignored with a warning. Export updated data with pipelineCacheData.
+        pipeline_cache_data: []const u8 = &.{},
+        /// Enable only when VK_EXT_descriptor_buffer was enabled at native
+        /// device creation. Classic descriptor sets are the portable default.
+        use_descriptor_buffer: bool = false,
+        /// Maximum descriptor sets per frame in the portable strategy.
+        descriptor_set_capacity: u32 = 4096,
+        /// Minimum initial-upload chunk size per in-flight frame. Large batches
+        /// may use extra chunks; those retire after the frame fence. One normal
+        /// chunk per frame is cached for reuse after peak loading bursts.
         copy_staging_buffer_size: u32 = 4 * 1024 * 1024,
         transient_staging_buffer_size: u32 = 16 * 1024 * 1024,
         descriptor_buffer_size: u32 = 16 * 1024 * 1024,
@@ -129,7 +208,14 @@ pub const BackendOptions = union(Backend) {
     },
     wgpu: struct {
         device: *const anyopaque,
-        /// Resolves webgpu.h functions by name.
+        /// Optional native instance, needed by Dawn's future/event polling.
+        instance: ?*const anyopaque = null,
+        /// Positive values require TimedWaitAny enabled on that instance.
+        /// Zero keeps polling non-blocking; use readback tickets without a
+        /// native blocking provider. wgpu-native's DevicePoll needs no instance.
+        wait_timeout_ns: u64 = 0,
+        /// Resolves webgpu.h functions by name. wgpu-native v29's GetProcAddress
+        /// is unimplemented: resolve exports with the native loader instead.
         get_proc_address: *const fn (name: [:0]const u8, user_data: ?*anyopaque) ?*const anyopaque,
         user_data: ?*anyopaque = null,
         bindgroups_cache_size: u32 = 1024,
@@ -138,6 +224,7 @@ pub const BackendOptions = union(Backend) {
     gl: GlOptions,
     gles: GlOptions,
 
+    /// Loader for an already-current GL/GLES context. Keep its library alive until Device teardown.
     pub const GlOptions = struct {
         /// Resolves GL functions of the current context. On Windows desktop GL
         /// it may be null, then functions are loaded from opengl32.dll.
@@ -146,6 +233,7 @@ pub const BackendOptions = union(Backend) {
     };
 };
 
+/// Device creation settings, pool capacities, defaults and diagnostic policy.
 pub const Options = struct {
     backend: BackendOptions,
     /// Defaults for swapchain passes and for attachment images and pipelines
@@ -171,8 +259,13 @@ pub const Options = struct {
     /// Clamps limits to values that every backend supports.
     portable_limits: bool = false,
     /// Receives diagnostics; null logs them through `std.log` (scope `.zicr`).
+    /// Callbacks must not mutate, destroy or reenter this Device.
     diagnostics: ?*const fn (Diagnostic) void = null,
+    /// Delivered once on the calling/owning thread by status or the next command.
+    /// Do not destroy/reenter this Device from its callback.
+    on_device_lost: ?*const fn (DeviceLoss) void = null,
 
+    /// How invalid commands are reported and whether they terminate execution.
     pub const Validation = enum {
         /// No validation (validation code is also compiled out without the
         /// `debug` build option).
@@ -187,8 +280,10 @@ pub const Options = struct {
 
 const internal_debug = @import("config.zig").debug;
 
-pub const InitError = error{ DeviceAlreadyExists, OutOfMemory, BackendUnavailable, BackendInitFailed, InvalidOptions };
+/// Device setup failure; native handles remain owned by the caller.
+pub const InitError = error{ OutOfMemory, BackendUnavailable, BackendInitFailed, InvalidOptions };
 
+/// Effective resource and binding limits; values may be clamped by portable_limits.
 pub const Limits = struct {
     max_image_size_2d: u32,
     max_image_size_cube: u32,
@@ -202,6 +297,7 @@ pub const Limits = struct {
     max_storage_image_bindings_per_stage: u32,
 };
 
+/// Operations supported for a pixel format on this device.
 pub const FormatInfo = struct {
     sample: bool,
     filter: bool,
@@ -216,6 +312,7 @@ pub const FormatInfo = struct {
     bytes_per_pixel: u32,
 };
 
+/// Resource creation failure, including invalid descriptors, exhausted pools or device loss.
 pub const CreateError = error{
     /// The pool of this resource type is full.
     PoolExhausted,
@@ -223,24 +320,25 @@ pub const CreateError = error{
     InvalidDescriptor,
     /// The backend could not create the resource.
     CreationFailed,
+    /// Recreate the Device and its resources; see Device.status.
+    DeviceLost,
 };
 
-/// The shared state of the single active device.
+/// Each Device owns pools, backend state and diagnostics independently.
 const Context = struct {
+    state: core.State,
     options: Options,
-    /// Set while a resource is created, so that a failed descriptor validation
-    /// returns an error instead of panicking.
+    identity: u32,
     creating: bool = false,
+    loss_delivered: bool = false,
 };
-var context: ?Context = null;
-
+var next_device_identity: std.atomic.Value(u32) = .init(1);
 fn ctx() *Context {
-    if (context) |*c| return c;
-    @panic("zicr.gpu: no device");
+    return @ptrCast(@alignCast(core.state().desc.logger.user_data.?));
 }
 
-fn coreLogger(_: ?[*:0]const u8, level: u32, item_id: u32, message: ?[*:0]const u8, _: u32, _: ?[*:0]const u8, _: ?*anyopaque) void {
-    const c = context orelse return;
+fn coreLogger(_: ?[*:0]const u8, level: u32, item_id: u32, message: ?[*:0]const u8, _: u32, _: ?[*:0]const u8, userdata: ?*anyopaque) void {
+    const c: *Context = @ptrCast(@alignCast(userdata orelse return));
     const item: LogItem = @fromBackingInt(@intCast(item_id));
     const diag: Diagnostic = .{
         .item = item,
@@ -267,9 +365,21 @@ fn coreLogger(_: ?[*:0]const u8, level: u32, item_id: u32, message: ?[*:0]const 
     if (diag.level == .panic and item != .validation_failed) @panic(log_messages.message(item));
 }
 
+fn lossDetected() bool {
+    const code = core.state().loss_code.load(.acquire);
+    if (code == 0) return false;
+    const c = ctx();
+    if (!c.loss_delivered) {
+        c.loss_delivered = true;
+        if (c.options.on_device_lost) |callback| callback(.{ .device_id = c.identity, .backend = std.meta.activeTag(c.options.backend), .native_code = code });
+    }
+    return true;
+}
+
 /// Runs a core command and applies the validation policy: in `.fatal` mode a
 /// command that failed validation panics after its diagnostics were reported.
 inline fn validated(command: anytype, args: anytype) void {
+    if (lossDetected()) return;
     const s = core.state();
     s.validate_error = .ok;
     @call(.auto, command, args);
@@ -278,10 +388,19 @@ inline fn validated(command: anytype, args: anytype) void {
     }
 }
 
-/// The GPU device. There is one active device at a time.
+/// An independent GPU device with owned backend state and resource pools.
+/// Do not copy it. Calls on one Device require external serialization; independent
+/// Devices can run on different threads. Shared native handles retain their
+/// native API's external-synchronization requirements. GL contexts must be current
+/// by the caller before using their Device. Resources belong to their creator.
 pub const Device = struct {
+    context: *Context,
+
+    fn enter(self: *const Device) core.Scope {
+        return core.enter(&self.context.state);
+    }
+    /// Create independent GPU state around caller-owned native device/context handles.
     pub fn init(allocator: std.mem.Allocator, options: Options) InitError!Device {
-        if (context != null) return error.DeviceAlreadyExists;
         inline for (@typeInfo(@TypeOf(options.pools)).@"struct".field_names) |name| {
             if (@field(options.pools, name) == 0) return error.InvalidOptions;
         }
@@ -316,6 +435,9 @@ pub const Device = struct {
                     .get_instance_proc_addr = vk.get_instance_proc_addr,
                 };
                 desc.vulkan = .{
+                    .pipeline_cache_data = rangeOf(vk.pipeline_cache_data),
+                    .use_descriptor_buffer = vk.use_descriptor_buffer,
+                    .descriptor_set_capacity = vk.descriptor_set_capacity,
                     .copy_staging_buffer_size = std.math.cast(i32, vk.copy_staging_buffer_size) orelse return error.InvalidOptions,
                     .transient_staging_buffer_size = std.math.cast(i32, vk.transient_staging_buffer_size) orelse return error.InvalidOptions,
                     .descriptor_buffer_size = std.math.cast(i32, vk.descriptor_buffer_size) orelse return error.InvalidOptions,
@@ -342,7 +464,7 @@ pub const Device = struct {
             },
             .wgpu => |wgpu| blk: {
                 if (options.defaults.color_format == null) return error.InvalidOptions;
-                desc.environment.wgpu = .{ .device = wgpu.device, .get_proc_address = wgpu.get_proc_address, .user_data = wgpu.user_data };
+                desc.environment.wgpu = .{ .instance = wgpu.instance, .wait_timeout_ns = wgpu.wait_timeout_ns, .device = wgpu.device, .get_proc_address = wgpu.get_proc_address, .user_data = wgpu.user_data };
                 desc.wgpu = .{ .bindgroups_cache_size = std.math.cast(i32, wgpu.bindgroups_cache_size) orelse return error.InvalidOptions, .disable_bindgroups_cache = wgpu.disable_bindgroups_cache };
                 break :blk .wgpu;
             },
@@ -351,25 +473,62 @@ pub const Device = struct {
                 break :blk if (options.backend == .gl) .glcore else .gles3;
             },
         };
-        context = .{ .options = options };
-        errdefer context = null;
-        internal.setup(allocator, kind, desc) catch |err| return switch (err) {
+        const context = try allocator.create(Context);
+        errdefer allocator.destroy(context);
+        const identity = next_device_identity.fetchAdd(1, .monotonic);
+        if (identity == 0) @panic("zicr.gpu: device identity exhausted");
+        context.* = .{ .state = undefined, .options = options, .identity = identity };
+        desc.logger.user_data = context;
+        @import("api.zig").initState(&context.state, allocator, kind, desc) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             error.BackendNotPorted, error.MetalNotAvailable => error.BackendUnavailable,
             error.InvalidPoolSize, error.InvalidListenerCapacity, error.UseZigAllocator => error.InvalidOptions,
             else => error.BackendInitFailed,
         };
-        return .{};
+        return .{ .context = context };
     }
 
+    /// Drain pending work and release owned GPU resources. Release readback tickets first.
     pub fn deinit(self: *Device) void {
-        _ = self;
-        internal.shutdown();
-        context = null;
+        const context = self.context;
+        const allocator = context.state.allocator;
+        @import("api.zig").deinitState(&context.state);
+        allocator.destroy(context);
+        self.* = undefined;
     }
 
+    /// Poll removal status without waiting for the GPU. Once lost, resource
+    /// creation fails and commands are skipped. To recover, release readbacks,
+    /// deinit this Device, recreate the native device and rebuild GPU resources
+    /// from CPU descriptors/data. New Device identities reject every old handle.
+    pub fn status(self: *const Device) DeviceStatus {
+        const scope = self.enter();
+        defer scope.end();
+        @import("backend.zig").pollDeviceLoss();
+        if (!lossDetected()) return .ready;
+        return .{ .lost = .{ .device_id = self.context.identity, .backend = std.meta.activeTag(self.context.options.backend), .native_code = self.context.state.loss_code.load(.acquire) } };
+    }
+
+    /// Forward host-owned WebGPU device.lost / WebGL context-loss events here.
+    /// Thread-safe while this Device remains alive; callback delivery is deferred
+    /// to status/commands on its owning thread. A zero code is normalized to -1.
+    pub fn notifyLost(self: *const Device, native_code: i32) void {
+        _ = self.context.state.loss_code.cmpxchgStrong(0, if (native_code == 0) -1 else native_code, .acq_rel, .acquire);
+    }
+
+    /// Allocates a serialized Vulkan pipeline cache for persistence by the app.
+    /// Bytes are driver/device specific; initialization ignores incompatible data.
+    pub fn pipelineCacheData(self: *const Device, allocator: std.mem.Allocator) (std.mem.Allocator.Error || error{ UnsupportedBackend, DriverError })![]u8 {
+        const scope = self.enter();
+        defer scope.end();
+        if (self.context.state.impl != .vulkan) return error.UnsupportedBackend;
+        return @import("backends/vulkan/pipeline_cache.zig").data(&self.context.state.impl.vulkan, allocator);
+    }
+
+    /// Return the selected backend.
     pub fn backend(self: *const Device) Backend {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
         return switch (internal.queryBackend()) {
             .glcore => .gl,
             .gles3 => .gles,
@@ -382,21 +541,28 @@ pub const Device = struct {
         };
     }
 
+    /// Return backend capabilities. Vulkan callers must honor the native-device
+    /// feature-enablement contract in BackendOptions before using optional paths.
     pub fn features(self: *const Device) Features {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
         return internal.queryFeatures();
     }
 
+    /// Return effective device limits, including optional portable limits.
     pub fn limits(self: *const Device) Limits {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
         const l = internal.queryLimits();
         var res: Limits = undefined;
         inline for (@typeInfo(Limits).@"struct".field_names) |name| @field(res, name) = @intCast(@max(@field(l, name), 0));
         return res;
     }
 
+    /// Return support for sampling, rendering and storage in a pixel format.
     pub fn formatInfo(self: *const Device, format: PixelFormat) FormatInfo {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
         std.debug.assert(format != .none);
         const info = internal.queryPixelformat(enumCast(e.PixelFormat, format));
         return .{
@@ -415,57 +581,74 @@ pub const Device = struct {
 
     /// Statistics of the previous frame and resource totals.
     pub fn stats(self: *const Device) Stats {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
         return internal.queryStats();
     }
 
+    /// Enable or disable collection of frame counters.
     pub fn setStatsEnabled(self: *Device, enabled: bool) void {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
         if (enabled) internal.enableStats() else internal.disableStats();
     }
 
     /// Resets the backend's state cache after native rendering code changed the
     /// API state behind the device's back.
     pub fn resetStateCache(self: *Device) void {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
         internal.resetStateCache();
     }
 
     // ------------------------------------------------------------ resources
 
+    /// Create a device-owned buffer, copying initialization data before returning.
     pub fn createBuffer(self: *Device, desc: BufferDesc) CreateError!Buffer {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
         return create(Buffer, internal.makeBuffer, desc.toInternal());
     }
 
+    /// Create a device-owned image from its dimensions, format and initial data.
     pub fn createImage(self: *Device, desc: ImageDesc) CreateError!Image {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
         return create(Image, internal.makeImage, desc.toInternal());
     }
 
+    /// Create sampling/filter/address state.
     pub fn createSampler(self: *Device, desc: SamplerDesc) CreateError!Sampler {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
         return create(Sampler, internal.makeSampler, desc.toInternal());
     }
 
+    /// Create shader functions and their reflected binding interface.
     pub fn createShader(self: *Device, desc: ShaderDesc) CreateError!Shader {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
         return create(Shader, internal.makeShader, desc.toInternal());
     }
 
+    /// Create render or compute pipeline state compatible with its shader.
     pub fn createPipeline(self: *Device, desc: PipelineDesc) CreateError!Pipeline {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
         return create(Pipeline, internal.makePipeline, desc.toInternal());
     }
 
+    /// Create a typed resource binding or image attachment view.
     pub fn createView(self: *Device, desc: ViewDesc) CreateError!View {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
         return create(View, internal.makeView, desc.toInternal());
     }
 
     /// Destroys a resource of any kind; invalid and stale handles are ignored.
     pub fn destroy(self: *Device, handle: anytype) void {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
         const raw_id = id(handle);
         switch (@TypeOf(handle)) {
             Buffer => internal.destroyBuffer(.{ .id = raw_id }),
@@ -480,7 +663,8 @@ pub const Device = struct {
 
     /// The state of a resource; `.invalid` for invalid or stale handles.
     pub fn state(self: *const Device, handle: anytype) ResourceState {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
         const raw_id = id(handle);
         const s = switch (@TypeOf(handle)) {
             Buffer => internal.queryBufferState(.{ .id = raw_id }),
@@ -494,8 +678,10 @@ pub const Device = struct {
         return @fromBackingInt(@intCast(@backingInt(s)));
     }
 
+    /// Return buffer metadata, or null for an invalid or foreign handle.
     pub fn bufferInfo(self: *const Device, buffer: Buffer) ?BufferInfo {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
         const buf = core.lookupBuffer(id(buffer)) orelse return null;
         return .{
             .state = @fromBackingInt(@intCast(@backingInt(buf.slot.state))),
@@ -506,8 +692,10 @@ pub const Device = struct {
         };
     }
 
+    /// Return image metadata, or null for an invalid or foreign handle.
     pub fn imageInfo(self: *const Device, image: Image) ?ImageInfo {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
         const img = core.lookupImage(id(image)) orelse return null;
         return .{
             .state = @fromBackingInt(@intCast(@backingInt(img.slot.state))),
@@ -522,14 +710,16 @@ pub const Device = struct {
         };
     }
 
+    /// Return view metadata with handles owned by this Device, or null if invalid.
     pub fn viewInfo(self: *const Device, view: View) ?ViewInfo {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
         const v = core.lookupView(id(view)) orelse return null;
         return .{
             .state = @fromBackingInt(@intCast(@backingInt(v.slot.state))),
             .type = @fromBackingInt(@intCast(@backingInt(v.cmn.type))),
-            .buffer = @fromBackingInt(@intCast(v.cmn.buf.ref.sref.id)),
-            .image = @fromBackingInt(@intCast(v.cmn.img.ref.sref.id)),
+            .buffer = ownedHandle(Buffer, v.cmn.buf.ref.sref.id),
+            .image = ownedHandle(Image, v.cmn.img.ref.sref.id),
         };
     }
 
@@ -538,7 +728,8 @@ pub const Device = struct {
     /// Writes into a buffer: before `seal` for buffers created with
     /// `.writes = .unsealed`, else once per frame for `.writes = .transient`.
     pub fn writeBuffer(self: *Device, buffer: Buffer, offset: usize, data: []const u8) void {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
         const desc: t.WriteBufferDesc = .{ .src = .{ .data = rangeOf(data) }, .dst = .{ .buffer = .{ .id = id(buffer) }, .offset = offset }, .size = data.len };
         if (core.lookupBuffer(id(buffer))) |buf| if (buf.slot.state == .unsealed) return validated(internal.writeBufferUnsealed, .{desc});
         validated(internal.writeBufferTransient, .{desc});
@@ -546,7 +737,8 @@ pub const Device = struct {
 
     /// Writes a region of an image, see `writeBuffer` for when writes are allowed.
     pub fn writeImage(self: *Device, image: Image, region: ImageRegion, data: []const u8, layout: DataLayout) void {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
         const transfer = resolveTransfer(image, region, layout);
         const desc: t.WriteImageDesc = .{
             .src = .{ .data = rangeOf(data), .bytes_per_row = transfer.bytes_per_row, .bytes_per_slice = transfer.bytes_per_slice },
@@ -557,9 +749,12 @@ pub const Device = struct {
         validated(internal.writeImageTransient, .{desc});
     }
 
+    /// Unsealed resources are CPU initialization resources: draws that bind them
+    /// are skipped until they are sealed.
     /// Ends the unsealed phase of a buffer or image created with `.writes = .unsealed`.
     pub fn seal(self: *Device, handle: anytype) void {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
         switch (@TypeOf(handle)) {
             Buffer => validated(internal.sealBuffer, .{t.Buffer{ .id = id(handle) }}),
             Image => validated(internal.sealImage, .{t.Image{ .id = id(handle) }}),
@@ -567,8 +762,10 @@ pub const Device = struct {
         }
     }
 
+    /// Record a byte-range copy between buffers with matching copy usages.
     pub fn copyBuffer(self: *Device, copy: BufferCopy) void {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
         validated(internal.copyBufferToBuffer, .{t.CopyBufferToBufferDesc{
             .src = .{ .buffer = .{ .id = id(copy.src) }, .offset = copy.src_offset },
             .dst = .{ .buffer = .{ .id = id(copy.dst) }, .offset = copy.dst_offset },
@@ -576,8 +773,10 @@ pub const Device = struct {
         }});
     }
 
+    /// Record a buffer-to-image region copy using the supplied row and slice layout.
     pub fn copyBufferToImage(self: *Device, copy: BufferToImageCopy) void {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
         const transfer = resolveTransfer(copy.dst, copy.region, copy.layout);
         validated(internal.copyBufferToImage, .{t.CopyBufferToImageDesc{
             .src = .{ .buffer = .{ .id = id(copy.src) }, .offset = copy.src_offset, .bytes_per_row = transfer.bytes_per_row, .bytes_per_slice = transfer.bytes_per_slice },
@@ -592,7 +791,8 @@ pub const Device = struct {
     /// starting at `offset`. Call outside of passes, typically after `commit`;
     /// the buffer needs `usage.copy_src`.
     pub fn readBuffer(self: *Device, buffer: Buffer, offset: usize, out: []u8) ReadError!void {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
         if (!readChecked(internal.readBuffer, .{ t.Buffer{ .id = id(buffer) }, offset, out })) return error.ReadFailed;
     }
 
@@ -602,7 +802,8 @@ pub const Device = struct {
     /// The image needs `usage.copy_src`; compressed, depth and multisampled
     /// images can't be read.
     pub fn readImage(self: *Device, image: Image, region: ImageRegion, out: []u8, layout: DataLayout) ReadError!void {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
         const desc: internal.ReadImageDesc = .{
             .image = .{ .id = id(image) },
             .mip_level = region.mip_level,
@@ -618,48 +819,195 @@ pub const Device = struct {
         if (!readChecked(internal.readImage, .{ desc, out })) return error.ReadFailed;
     }
 
+    /// Copies a buffer into an owned readback ticket. WebGPU submits committed
+    /// work and schedules mapping without blocking; the source may then be destroyed.
+    pub fn requestReadBuffer(self: *Device, buffer: Buffer, offset: usize, size: usize) (ReadError || std.mem.Allocator.Error)!Readback {
+        const device_scope = self.enter();
+        defer device_scope.end();
+        if (lossDetected()) return error.ReadFailed;
+        const context_ptr = ctx();
+        context_ptr.creating = true;
+        defer context_ptr.creating = false;
+        const allocator = core.state().allocator;
+        const buf = core.lookupBuffer(id(buffer)) orelse return error.ReadFailed;
+        if (buf.slot.state != .valid) return error.ReadFailed;
+        if (!@import("validation.zig").readBuffer(buf, offset, size)) return error.ReadFailed;
+        if (size == 0 or offset > buf.cmn.size or size > buf.cmn.size - offset or !buf.cmn.usage.copy_src or core.state().cur_pass.in_pass) return error.ReadFailed;
+        const data = try allocator.alloc(u8, size);
+        errdefer allocator.free(data);
+        if (core.state().impl == .wgpu and buf.native.wgpu.staging == null) {
+            const pending = core.state().impl.wgpu.requestBufferRead(buf, offset, data) orelse return error.ReadFailed;
+            return .{ .allocator = allocator, .data = data, .pending = pending };
+        }
+        if (core.state().impl == .gl and buf.native.gl.staging == null) {
+            try @import("readback_task.zig").prepare(core.state());
+            const task = @import("backends/gl/readback.zig").buffer(&core.state().impl.gl, buf, offset, data) orelse return error.ReadFailed;
+            @import("readback_task.zig").register(core.state(), task);
+            return .{ .allocator = allocator, .data = data, .native_task = task };
+        }
+        if (core.state().impl == .metal) {
+            try @import("readback_task.zig").prepare(core.state());
+            const task = @import("backends/metal/commands.zig").requestBufferRead(&core.state().impl.metal, buf, offset, data) orelse return error.ReadFailed;
+            @import("readback_task.zig").register(core.state(), task);
+            return .{ .allocator = allocator, .data = data, .native_task = task };
+        }
+        if (core.state().impl == .d3d11 and buf.native.d3d11.staging == null) {
+            try @import("readback_task.zig").prepare(core.state());
+            const task = @import("backends/d3d11/readback.zig").buffer(&core.state().impl.d3d11, buf, offset, data) orelse return error.ReadFailed;
+            @import("readback_task.zig").register(core.state(), task);
+            return .{ .allocator = allocator, .data = data, .native_task = task };
+        }
+        if (core.state().impl == .d3d12 and buf.native.d3d12.staging == null) {
+            try @import("readback_task.zig").prepare(core.state());
+            const task = @import("backends/d3d12/commands.zig").requestBufferRead(&core.state().impl.d3d12, buf, offset, data) orelse return error.ReadFailed;
+            @import("readback_task.zig").register(core.state(), task);
+            return .{ .allocator = allocator, .data = data, .native_task = task };
+        }
+        if (core.state().impl == .vulkan) {
+            try @import("readback_task.zig").prepare(core.state());
+            const task = core.state().impl.vulkan.requestBufferRead(buf, offset, data) orelse return error.ReadFailed;
+            @import("readback_task.zig").register(core.state(), task);
+            return .{ .allocator = allocator, .data = data, .native_task = task };
+        }
+        try self.readBuffer(buffer, offset, data);
+        return .{ .allocator = allocator, .data = data };
+    }
+
+    /// Image equivalent of requestReadBuffer. Pitches have the same meaning as
+    /// readImage. Padding bytes are initialized to zero; no destination is borrowed.
+    pub fn requestReadImage(self: *Device, image: Image, region: ImageRegion, layout: DataLayout) (ReadError || std.mem.Allocator.Error)!Readback {
+        const device_scope = self.enter();
+        defer device_scope.end();
+        if (lossDetected()) return error.ReadFailed;
+        const context_ptr = ctx();
+        context_ptr.creating = true;
+        defer context_ptr.creating = false;
+        const img = core.lookupImage(id(image)) orelse return error.ReadFailed;
+        if (img.slot.state != .valid or region.mip_level >= img.cmn.num_mipmaps) return error.ReadFailed;
+        const mip: i32 = @intCast(region.mip_level);
+        const width: usize = @intCast(core.miplevelDim(img.cmn.width, mip));
+        const height: usize = @intCast(core.miplevelDim(img.cmn.height, mip));
+        const slices: usize = @intCast(if (img.cmn.type == .@"3d") core.miplevelDim(img.cmn.num_slices, mip) else img.cmn.num_slices);
+        if (region.x >= width or region.y >= height or region.slice >= slices) return error.ReadFailed;
+        const w = region.width orelse (width - region.x);
+        const h = region.height orelse (height - region.y);
+        const n = region.slices orelse (slices - region.slice);
+        const bpp: usize = @intCast(@import("formats.zig").pixelSize(img.cmn.pixel_format));
+        if (w == 0 or h == 0 or n == 0 or w > width - region.x or h > height - region.y or n > slices - region.slice or bpp == 0 or img.cmn.sample_count != 1 or !img.cmn.usage.copy_src or core.state().cur_pass.in_pass) return error.ReadFailed;
+        if (@import("formats.zig").isCompressed(img.cmn.pixel_format) or core.isDepthOrDepthStencilFormat(img.cmn.pixel_format)) return error.ReadFailed;
+        const row = std.math.mul(usize, w, bpp) catch return error.ReadFailed;
+        const row_pitch = layout.bytes_per_row orelse row;
+        const minimum_slice = std.math.mul(usize, row_pitch, h) catch return error.ReadFailed;
+        const slice_pitch = layout.bytes_per_slice orelse minimum_slice;
+        if (row_pitch < row or slice_pitch < minimum_slice) return error.ReadFailed;
+        const last_slice = std.math.mul(usize, n - 1, slice_pitch) catch return error.ReadFailed;
+        const last_row = std.math.mul(usize, h - 1, row_pitch) catch return error.ReadFailed;
+        const size = std.math.add(usize, last_slice, std.math.add(usize, last_row, row) catch return error.ReadFailed) catch return error.ReadFailed;
+        const desc: internal.ReadImageDesc = .{ .image = .{ .id = id(image) }, .mip_level = region.mip_level, .x = region.x, .y = region.y, .slice = region.slice, .width = @intCast(w), .height = @intCast(h), .num_slices = @intCast(n), .bytes_per_row = row_pitch, .bytes_per_slice = slice_pitch };
+        const resolved = @import("api.zig").resolveReadImage(desc, size) orelse return error.ReadFailed;
+        const allocator = core.state().allocator;
+        const data = try allocator.alloc(u8, size);
+        errdefer allocator.free(data);
+        @memset(data, 0);
+        if (core.state().impl == .wgpu) {
+            const pending = core.state().impl.wgpu.requestImageRead(resolved.image, &resolved.region, data) orelse return error.ReadFailed;
+            return .{ .allocator = allocator, .data = data, .pending = pending };
+        }
+        if (core.state().impl == .gl) {
+            try @import("readback_task.zig").prepare(core.state());
+            const task = @import("backends/gl/readback.zig").image(&core.state().impl.gl, resolved.image, &resolved.region, data) orelse return error.ReadFailed;
+            @import("readback_task.zig").register(core.state(), task);
+            return .{ .allocator = allocator, .data = data, .native_task = task };
+        }
+        if (core.state().impl == .metal) {
+            try @import("readback_task.zig").prepare(core.state());
+            const task = @import("backends/metal/commands.zig").requestImageRead(&core.state().impl.metal, resolved.image, &resolved.region, data) orelse return error.ReadFailed;
+            @import("readback_task.zig").register(core.state(), task);
+            return .{ .allocator = allocator, .data = data, .native_task = task };
+        }
+        if (core.state().impl == .d3d11) {
+            try @import("readback_task.zig").prepare(core.state());
+            const task = @import("backends/d3d11/readback.zig").image(&core.state().impl.d3d11, resolved.image, &resolved.region, data) orelse return error.ReadFailed;
+            @import("readback_task.zig").register(core.state(), task);
+            return .{ .allocator = allocator, .data = data, .native_task = task };
+        }
+        if (core.state().impl == .d3d12) {
+            try @import("readback_task.zig").prepare(core.state());
+            const task = @import("backends/d3d12/commands.zig").requestImageRead(&core.state().impl.d3d12, resolved.image, &resolved.region, data) orelse return error.ReadFailed;
+            @import("readback_task.zig").register(core.state(), task);
+            return .{ .allocator = allocator, .data = data, .native_task = task };
+        }
+        if (core.state().impl == .vulkan) {
+            try @import("readback_task.zig").prepare(core.state());
+            const task = core.state().impl.vulkan.requestImageRead(resolved.image, &resolved.region, data) orelse return error.ReadFailed;
+            @import("readback_task.zig").register(core.state(), task);
+            return .{ .allocator = allocator, .data = data, .native_task = task };
+        }
+        try self.readImage(image, region, data, layout);
+        return .{ .allocator = allocator, .data = data };
+    }
+
     // ------------------------------------------------------------ passes and frames
 
+    /// Begin a render pass with attachment views or a caller-owned swapchain image.
     pub fn beginPass(self: *Device, desc: PassDesc) Pass {
+        const device_scope = self.enter();
+        defer device_scope.end();
         validated(internal.beginPass, .{desc.toInternal()});
         return .{ .device = self };
     }
 
+    /// Begin a compute pass; end it before committing or starting another pass.
     pub fn beginComputePass(self: *Device, label: ?[:0]const u8) Pass {
+        const device_scope = self.enter();
+        defer device_scope.end();
         validated(internal.beginPass, .{t.Pass{ .compute = true, .label = if (label) |l| l.ptr else null }});
         return .{ .device = self };
     }
 
     /// Finishes the frame: submits recorded work and advances to the next frame.
     pub fn commit(self: *Device) void {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
+        @import("backend.zig").pollDeviceLoss();
+        if (lossDetected()) return;
         internal.commit();
+        @import("readback_task.zig").collect(core.state(), false);
+        _ = lossDetected();
     }
 
     /// Calls `listener` at every commit; returns false if it is already
     /// registered or the listener capacity is exhausted.
     pub fn addCommitListener(self: *Device, listener: CommitListener) bool {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
         return internal.addCommitListener(.{ .func = listener.func, .user_data = listener.user_data });
     }
 
+    /// Remove a previously registered listener; return whether it was present.
     pub fn removeCommitListener(self: *Device, listener: CommitListener) bool {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
         return internal.removeCommitListener(.{ .func = listener.func, .user_data = listener.user_data });
     }
 
+    /// Begin a named native GPU debug group where the backend supports it.
     pub fn pushDebugGroup(self: *Device, name: [:0]const u8) void {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
         internal.pushDebugGroup(name.ptr);
     }
 
+    /// End the most recently pushed native GPU debug group.
     pub fn popDebugGroup(self: *Device) void {
-        _ = self;
+        const device_scope = self.enter();
+        defer device_scope.end();
         internal.popDebugGroup();
     }
 };
 
 fn create(comptime H: type, comptime make: anytype, desc: anytype) CreateError!H {
+    if (lossDetected()) return error.DeviceLost;
     const c = ctx();
     const s = core.state();
     s.validate_error = .ok;
@@ -676,7 +1024,7 @@ fn create(comptime H: type, comptime make: anytype, desc: anytype) CreateError!H
         View => internal.queryViewState(handle),
         else => unreachable,
     };
-    if (res_state == .valid or res_state == .unsealed) return @fromBackingInt(@intCast(handle.id));
+    if ((res_state == .valid or res_state == .unsealed) and !lossDetected()) return ownedHandle(H, handle.id);
     const invalid = s.validate_error != .ok;
     switch (H) {
         Buffer => internal.destroyBuffer(handle),
@@ -687,9 +1035,45 @@ fn create(comptime H: type, comptime make: anytype, desc: anytype) CreateError!H
         View => internal.destroyView(handle),
         else => unreachable,
     }
+    if (lossDetected()) return error.DeviceLost;
     return if (invalid) error.InvalidDescriptor else error.CreationFailed;
 }
 
+/// Owned readback ticket. Do not copy it. Poll and deinit on the device's owning
+/// thread, and release all tickets before destroying the device or native loader.
+/// GPU-backed requests enqueue work and poll fences/maps without waiting. CPU
+/// staging/dummy buffers may complete immediately. Cancellation retires GPU
+/// resources only after their completion signal.
+pub const Readback = struct {
+    allocator: std.mem.Allocator,
+    data: []u8,
+    pending: ?*@import("backends/wgpu/readback.zig").Pending = null,
+    native_task: ?*@import("readback_task.zig").Task = null,
+
+    /// null means not ready: return to the browser event loop before polling again.
+    /// Ready bytes remain valid until deinit, including across repeated polls.
+    pub fn poll(self: *Readback) ReadError!?[]const u8 {
+        if (self.pending) |pending| return pending.poll();
+        if (self.native_task) |task| {
+            const scope = core.enter(task.owner);
+            defer scope.end();
+            if (!try task.poll(false)) return null;
+        }
+        return self.data;
+    }
+
+    /// Cancelling a pending ticket is safe; its callback retains the mapping state.
+    pub fn deinit(self: *Readback) void {
+        if (self.pending) |pending| pending.release() else if (self.native_task) |task| {
+            const scope = core.enter(task.owner);
+            defer scope.end();
+            task.release();
+        } else self.allocator.free(self.data);
+        self.* = undefined;
+    }
+};
+
+/// A rejected or failed readback operation; diagnostics provide further details.
 pub const ReadError = error{
     /// The read was rejected (see diagnostics) or the backend failed to read.
     ReadFailed,
@@ -697,12 +1081,14 @@ pub const ReadError = error{
 
 /// Like `validated`, but a rejected read returns an error in every mode.
 fn readChecked(comptime read: anytype, args: anytype) bool {
+    if (lossDetected()) return false;
     const c = ctx();
     c.creating = true;
     defer c.creating = false;
     return @call(.auto, read, args);
 }
 
+/// Callback invoked by commit; its userdata must remain valid while registered.
 pub const CommitListener = struct {
     func: *const fn (user_data: ?*anyopaque) void,
     user_data: ?*anyopaque = null,
@@ -749,6 +1135,7 @@ pub const Writes = enum {
     copy,
 };
 
+/// Buffer roles and write policy, fixed when the buffer is created.
 pub const BufferUsage = struct {
     vertex: bool = false,
     index: bool = false,
@@ -795,6 +1182,7 @@ pub const NativeObject = union(enum) {
     wgpu: *const anyopaque,
 };
 
+/// Buffer size, initial bytes, usage and optional injected native storage.
 pub const BufferDesc = struct {
     /// Without any of vertex/index/storage/staging, a vertex buffer.
     usage: BufferUsage = .{},
@@ -821,6 +1209,7 @@ pub const BufferDesc = struct {
     }
 };
 
+/// Buffer lifecycle and effective creation properties.
 pub const BufferInfo = struct {
     state: ResourceState,
     size: usize,
@@ -829,6 +1218,7 @@ pub const BufferInfo = struct {
     active_slot: u32,
 };
 
+/// Source/destination byte ranges for a GPU buffer copy.
 pub const BufferCopy = struct {
     src: Buffer,
     src_offset: usize = 0,
@@ -839,6 +1229,7 @@ pub const BufferCopy = struct {
 
 // ---------------------------------------------------------------- images
 
+/// Image sampling, attachment, storage, copy and write roles.
 pub const ImageUsage = struct {
     storage: bool = false,
     color_attachment: bool = false,
@@ -873,6 +1264,7 @@ pub const ImageUsage = struct {
     }
 };
 
+/// Image dimensions, format, mip data, usage and optional native storage.
 pub const ImageDesc = struct {
     type: ImageType = .@"2d",
     usage: ImageUsage = .{},
@@ -890,6 +1282,7 @@ pub const ImageDesc = struct {
     label: ?[:0]const u8 = null,
     native: ?NativeImage = null,
 
+    /// Native image handles borrowed by the Device; retain them through all GPU use.
     pub const NativeImage = union(enum) {
         gl: struct { texture: u32, target: u32 = 0 },
         metal: *const anyopaque,
@@ -924,6 +1317,7 @@ pub const ImageDesc = struct {
     }
 };
 
+/// Image lifecycle and effective dimensions, format and usage.
 pub const ImageInfo = struct {
     state: ResourceState,
     type: ImageType,
@@ -989,6 +1383,7 @@ pub const DataLayout = struct {
     }
 };
 
+/// GPU transfer from a buffer layout into an image subresource region.
 pub const BufferToImageCopy = struct {
     src: Buffer,
     src_offset: usize = 0,
@@ -999,6 +1394,7 @@ pub const BufferToImageCopy = struct {
 
 // ---------------------------------------------------------------- samplers
 
+/// Filtering, address, comparison and anisotropy settings for a sampler.
 pub const SamplerDesc = struct {
     min_filter: Filter = .nearest,
     mag_filter: Filter = .nearest,
@@ -1015,6 +1411,7 @@ pub const SamplerDesc = struct {
     label: ?[:0]const u8 = null,
     native: ?NativeSampler = null,
 
+    /// Borrowed native sampler handle for resource injection.
     pub const NativeSampler = union(enum) {
         gl: u32,
         metal: *const anyopaque,
@@ -1082,6 +1479,7 @@ pub const BindSlots = struct {
     glsl: u8 = 0,
 };
 
+/// Reflected vertex input with its backend-specific name or semantic.
 pub const ShaderAttr = struct {
     /// Checked against the vertex format of the pipeline when set.
     base_type: ?ShaderAttrBaseType = null,
@@ -1090,6 +1488,7 @@ pub const ShaderAttr = struct {
     hlsl_semantic_index: u8 = 0,
 };
 
+/// Uniform byte layout and native binding locations for one shader stage.
 pub const ShaderUniformBlock = struct {
     slot: u3,
     stage: ShaderStage,
@@ -1099,6 +1498,7 @@ pub const ShaderUniformBlock = struct {
     /// GL only: the uniforms making up the block, in memory order.
     glsl_uniforms: []const GlslUniform = &.{},
 
+    /// One named GLSL uniform used to upload a reflected uniform block.
     pub const GlslUniform = struct {
         type: UniformType,
         array_count: u16 = 1,
@@ -1106,6 +1506,7 @@ pub const ShaderUniformBlock = struct {
     };
 };
 
+/// Shader-visible texture, storage buffer or storage-image declaration.
 pub const ShaderView = struct {
     slot: u5,
     stage: ShaderStage,
@@ -1125,6 +1526,7 @@ pub const ShaderView = struct {
     bindings: BindSlots = .{},
 };
 
+/// Sampler declaration and backend-specific binding locations.
 pub const ShaderSampler = struct {
     slot: u4,
     stage: ShaderStage,
@@ -1132,6 +1534,7 @@ pub const ShaderSampler = struct {
     bindings: BindSlots = .{},
 };
 
+/// Texture/sampler pair used to form a combined GLSL sampler binding.
 pub const TextureSamplerPair = struct {
     stage: ShaderStage,
     view: u5,
@@ -1140,6 +1543,7 @@ pub const TextureSamplerPair = struct {
     glsl_name: ?[:0]const u8 = null,
 };
 
+/// Shader functions, reflected inputs and binding declarations for pipeline creation.
 pub const ShaderDesc = struct {
     stages: union(enum) {
         render: struct { vertex: ShaderFunction, fragment: ShaderFunction },
@@ -1248,6 +1652,7 @@ pub const ShaderDesc = struct {
 
 // ---------------------------------------------------------------- pipelines
 
+/// Stride and stepping for one vertex-buffer binding.
 pub const VertexBufferLayout = struct {
     /// null: computed from the attributes using this buffer.
     stride: ?u32 = null,
@@ -1255,6 +1660,7 @@ pub const VertexBufferLayout = struct {
     step_rate: u32 = 1,
 };
 
+/// Location, buffer slot, byte offset and encoding of one vertex attribute.
 pub const VertexAttr = struct {
     format: VertexFormat,
     buffer: u3 = 0,
@@ -1262,6 +1668,7 @@ pub const VertexAttr = struct {
     offset: ?u32 = null,
 };
 
+/// Stencil comparison and operations for one triangle face.
 pub const StencilFace = struct {
     compare: CompareFunc = .always,
     fail: StencilOp = .keep,
@@ -1269,6 +1676,7 @@ pub const StencilFace = struct {
     pass: StencilOp = .keep,
 };
 
+/// Front/back stencil tests, masks and reference value.
 pub const StencilState = struct {
     enabled: bool = false,
     front: StencilFace = .{},
@@ -1278,6 +1686,7 @@ pub const StencilState = struct {
     ref: u8 = 0,
 };
 
+/// Depth comparison, write control and attachment format.
 pub const DepthState = struct {
     /// null: the device's default depth format; `.none` for no depth attachment.
     format: ?PixelFormat = null,
@@ -1288,6 +1697,7 @@ pub const DepthState = struct {
     bias_clamp: f32 = 0,
 };
 
+/// Color and alpha blending equations and factors.
 pub const Blend = struct {
     src_rgb: BlendFactor = .one,
     dst_rgb: BlendFactor = .zero,
@@ -1297,6 +1707,7 @@ pub const Blend = struct {
     op_alpha: BlendOp = .add,
 };
 
+/// Render-target format, blend state and channel write mask.
 pub const ColorTarget = struct {
     /// null: the device's default color format.
     format: ?PixelFormat = null,
@@ -1305,6 +1716,7 @@ pub const ColorTarget = struct {
     blend: ?Blend = null,
 };
 
+/// Shader, vertex layout and fixed state for a render or compute pipeline.
 pub const PipelineDesc = struct {
     shader: Shader,
     compute: bool = false,
@@ -1394,8 +1806,12 @@ pub const PipelineDesc = struct {
 
 // ---------------------------------------------------------------- views
 
+/// Typed texture/storage binding or render attachment referencing a device resource.
 pub const ViewDesc = union(enum) {
     /// A sampled texture, optionally restricted to a range of mips and layers.
+    /// GL/GLES without native texture views emulate mip ranges at bind time;
+    /// one backing texture must use the same mip range on all units in a draw.
+    /// Layer subsets require native texture views and otherwise fail creation.
     texture: struct {
         image: Image,
         base_mip: u32 = 0,
@@ -1448,6 +1864,7 @@ pub const ViewDesc = union(enum) {
     }
 };
 
+/// View lifecycle, role and referenced device-owned resource handles.
 pub const ViewInfo = struct {
     state: ResourceState,
     type: ViewType,
@@ -1459,18 +1876,22 @@ pub const ViewInfo = struct {
 
 // ---------------------------------------------------------------- passes
 
+/// Whether attachment results must be retained after a pass.
 pub const Store = enum { store, dont_care };
 
+/// Load/clear and store behavior for a color attachment.
 pub const ColorAction = struct {
     load: union(enum) { clear: [4]f32, load, dont_care } = .{ .clear = .{ 0.5, 0.5, 0.5, 1 } },
     store: Store = .store,
 };
 
+/// Load/clear and store behavior for a depth attachment.
 pub const DepthAction = struct {
     load: union(enum) { clear: f32, load, dont_care } = .{ .clear = 1 },
     store: Store = .dont_care,
 };
 
+/// Load/clear and store behavior for a stencil attachment.
 pub const StencilAction = struct {
     load: union(enum) { clear: u8, load, dont_care } = .{ .clear = 0 },
     store: Store = .dont_care,
@@ -1488,6 +1909,7 @@ pub const Swapchain = struct {
     invalid: bool = false,
     native: Native = .none,
 
+    /// Backend-specific swapchain image or framebuffer for the current frame.
     pub const Native = union(enum) {
         none,
         gl: struct { framebuffer: u32 = 0 },
@@ -1503,7 +1925,10 @@ pub const Swapchain = struct {
             resolve_view: ?*const anyopaque = null,
             depth_stencil_image: ?*const anyopaque = null,
             depth_stencil_view: ?*const anyopaque = null,
+            /// Signal for presentation; use one per swapchain image so a submit
+            /// fence cannot cause reuse while the presentation engine still waits.
             render_finished_semaphore: *const anyopaque,
+            /// Signaled by acquiring this image; the rendering submission waits.
             present_complete_semaphore: *const anyopaque,
         },
     };
@@ -1547,6 +1972,7 @@ pub const Attachments = struct {
     depth_stencil: View = .invalid,
 };
 
+/// Render-pass target, attachment actions, dimensions and optional debug label.
 pub const PassDesc = struct {
     target: union(enum) {
         swapchain: Swapchain,
@@ -1611,8 +2037,10 @@ pub const PassDesc = struct {
     }
 };
 
+/// Pixel rectangle used by viewport and scissor commands.
 pub const Rect = struct { x: i32 = 0, y: i32 = 0, width: i32, height: i32 };
 
+/// Vertex buffer and byte offset bound to one vertex-input slot.
 pub const BufferBinding = struct {
     buffer: Buffer,
     offset: u32 = 0,
@@ -1643,6 +2071,7 @@ pub const Bindings = struct {
     }
 };
 
+/// Vertex/index range and instance parameters for a draw command.
 pub const Draw = struct {
     /// The first vertex, or the first index of indexed draws.
     first: u32 = 0,
@@ -1657,37 +2086,49 @@ pub const Draw = struct {
 pub const Pass = struct {
     device: *Device,
 
+    /// Coordinate origin used to interpret a viewport or scissor rectangle.
     pub const Origin = enum { bottom_left, top_left };
 
+    /// Set the viewport in pixels using the selected coordinate origin.
     pub fn setViewport(self: *Pass, rect: Rect, origin: Origin) void {
-        _ = self;
+        const device_scope = self.device.enter();
+        defer device_scope.end();
         validated(internal.applyViewport, .{ rect.x, rect.y, rect.width, rect.height, origin == .top_left });
     }
 
+    /// Set the scissor rectangle in pixels using the selected coordinate origin.
     pub fn setScissor(self: *Pass, rect: Rect, origin: Origin) void {
-        _ = self;
+        const device_scope = self.device.enter();
+        defer device_scope.end();
         validated(internal.applyScissorRect, .{ rect.x, rect.y, rect.width, rect.height, origin == .top_left });
     }
 
+    /// Bind render or compute pipeline state for subsequent commands.
     pub fn setPipeline(self: *Pass, pipeline: Pipeline) void {
-        _ = self;
+        const device_scope = self.device.enter();
+        defer device_scope.end();
         validated(internal.applyPipeline, .{t.Pipeline{ .id = id(pipeline) }});
     }
 
+    /// Bind vertex/index buffers, shader views and samplers.
     pub fn setBindings(self: *Pass, bindings: Bindings) void {
-        _ = self;
+        const device_scope = self.device.enter();
+        defer device_scope.end();
         validated(internal.applyBindings, .{bindings.toInternal()});
     }
 
     /// Sets the uniform block at `slot` from a pointer to a value or a slice.
     pub fn setUniforms(self: *Pass, slot: u3, data: anytype) void {
-        _ = self;
+        const device_scope = self.device.enter();
+        defer device_scope.end();
         const bytes = asBytes(data);
         validated(internal.applyUniforms, .{ @as(usize, slot), t.Range{ .ptr = bytes.ptr, .size = bytes.len } });
     }
 
+    /// Record a draw using the current pipeline, bindings and uniforms.
     pub fn draw(self: *Pass, args: Draw) void {
-        _ = self;
+        const device_scope = self.device.enter();
+        defer device_scope.end();
         if (args.base_vertex == 0 and args.first_instance == 0) {
             validated(internal.draw, .{ int(args.first), int(args.count), int(args.instances) });
         } else {
@@ -1695,13 +2136,18 @@ pub const Pass = struct {
         }
     }
 
+    /// Record compute workgroup counts, rather than individual thread counts.
     pub fn dispatch(self: *Pass, x: u32, y: u32, z: u32) void {
-        _ = self;
+        const device_scope = self.device.enter();
+        defer device_scope.end();
         validated(internal.dispatch, .{ int(x), int(y), int(z) });
     }
 
+    /// End this pass before committing or starting another pass.
     pub fn end(self: *Pass) void {
-        _ = self;
+        const device_scope = self.device.enter();
+        defer device_scope.end();
+        if (lossDetected() and !core.state().cur_pass.in_pass) return;
         internal.endPass();
     }
 };

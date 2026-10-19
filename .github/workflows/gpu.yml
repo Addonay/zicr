@@ -1,0 +1,105 @@
+name: GPU correctness
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      LIBGL_ALWAYS_SOFTWARE: '1'
+      VK_DRIVER_FILES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install pinned Zig
+        run: python3 tools/ci/install_zig.py --dest "$RUNNER_TEMP/zig"
+      - name: Install software GPU drivers and validation
+        run: sudo apt-get update && sudo apt-get install -y libegl1 libgl-dev libvulkan-dev libgl1-mesa-dri mesa-vulkan-drivers vulkan-validationlayers nodejs xvfb xauth libx11-6
+      - name: Core, upstream and cross-target checks
+        run: zig build check test test-upstream check-metal check-scenes-windows docs bench-tools --summary all
+      - name: Checked C/raw/public benchmark smoke (no performance claims)
+        run: python3 tools/bench/run.py --rounds 1 --samples 2 --warmup 1 --draws 100 --resources 64 --bytes 4096 --output /tmp/benchmark-smoke.json
+      - name: Safe optimized core tests
+        run: zig build test test-upstream -Doptimize=safe --summary all
+      - name: Real native API scenes with validation required
+        run: zig build test-scenes -- --async-readback --require-native-validation --backend gl --backend gles --backend vulkan
+      - name: Real X11 window presentation
+        run: xvfb-run -a zig build test-scenes -- --backend gl --backend gles --backend vulkan --window-smoke --require-native-validation
+      - name: Strict GL 3.3
+        env:
+          MESA_GL_VERSION_OVERRIDE: '3.3'
+          MESA_GLSL_VERSION_OVERRIDE: '330'
+        run: zig build test-scenes -- --backend gl_legacy --async-readback
+      - name: Strict GLES 3.0
+        env:
+          MESA_GLES_VERSION_OVERRIDE: '3.0'
+        run: zig build test-scenes -- --backend gles_legacy --async-readback
+      - name: Differential core stress
+        run: zig build test-diff -- --runs 10000 --steps 500
+      - name: Chromium software browser APIs
+        run: zig build test-web
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install pinned Zig
+        run: python tools/ci/install_zig.py --dest "$env:RUNNER_TEMP/zig"
+      - name: Core and upstream
+        run: zig build test test-upstream --summary all
+      - name: Install native DirectX validation tools
+        shell: pwsh
+        run: |
+          $capability = Get-WindowsCapability -Online -Name 'Tools.Graphics.DirectX*'
+          if (!$capability) { throw 'DirectX Graphics Tools capability unavailable' }
+          foreach ($item in $capability) {
+            if ($item.State -ne 'Installed') {
+              Add-WindowsCapability -Online -Name $item.Name -ErrorAction Stop
+            }
+          }
+      - name: Native Windows unit and upstream tests
+        run: zig build test test-upstream --summary all
+      - name: D3D12 WARP with debug and GPU validation required
+        run: zig build test-scenes -- --backend d3d12_warp --require-native-validation --async-readback
+      - name: D3D12 WARP flip-model presentation
+        run: zig build test-scenes -- --backend d3d12_warp --window-smoke --require-native-validation
+      - name: Native D3D11
+        run: zig build test-scenes -- --backend d3d11 --async-readback
+      - name: Native D3D11 flip-model presentation
+        run: zig build test-scenes -- --backend d3d11 --window-smoke
+      - name: Checked C/raw/public D3D11 benchmark smoke
+        run: |
+          zig build bench-d3d11-tools
+          python tools/bench/run.py --executable zig-out/bin/zicr-bench-d3d11.exe --rounds 1 --samples 2 --warmup 1 --draws 100 --resources 64 --bytes 4096 --output benchmark-d3d11-smoke.json
+  metal:
+    runs-on: macos-15
+    timeout-minutes: 40
+    env:
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '1'
+      MTL_DEBUG_LAYER_ERROR_MODE: assert
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install pinned Zig
+        run: python3 tools/ci/install_zig.py --dest "$RUNNER_TEMP/zig"
+      - name: Core and Apple cross-target checks
+        run: zig build test test-upstream check-metal --summary all
+      # No device means a failed runtime gate, never a fabricated passing skip.
+      # Use a hardware-backed self-hosted runner if the hosted VM has no Metal GPU.
+      - name: Metal native scene and validation gate
+        run: zig build test-scenes -- --backend metal --require-native-validation --async-readback
+      - name: Native Metal window presentation
+        env:
+          MTL_DEBUG_LAYER: '1'
+          MTL_SHADER_VALIDATION: '1'
+        run: zig build test-scenes -- --backend metal --window-smoke --require-native-validation
+      - name: Checked C/raw/public Metal benchmark smoke
+        env:
+          MTL_DEBUG_LAYER: '0'
+          MTL_SHADER_VALIDATION: '0'
+        run: |
+          zig build bench-metal-tools
+          python3 tools/bench/run.py --executable zig-out/bin/zicr-bench-metal --rounds 1 --samples 2 --warmup 1 --draws 100 --resources 64 --bytes 4096 --output /tmp/benchmark-metal-smoke.json

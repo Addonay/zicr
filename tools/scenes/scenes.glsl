@@ -100,3 +100,39 @@ layout(location=1) out vec4 frag_b;
 void main() { frag_a = color_a; frag_b = color_b; }
 @end
 @program mrt mrt_vs mrt_fs
+
+
+@fs texture_view_aliases_fs
+layout(binding=0) uniform texture2D first_texture;
+layout(binding=1) uniform texture2D second_texture;
+layout(binding=0) uniform sampler smp;
+in vec2 uv;
+out vec4 frag_color;
+void main() {
+    frag_color = 0.5 * (textureLod(sampler2D(first_texture, smp), uv, 0.0) + textureLod(sampler2D(second_texture, smp), uv, 0.0));
+}
+@end
+@program texture_view_aliases tex_vs texture_view_aliases_fs
+
+@fs shadow_fs
+layout(binding=0) uniform tex_fs_params { vec4 lod_layer; };
+layout(binding=0) uniform texture2D depth_texture;
+layout(binding=0) uniform samplerShadow shadow_sampler;
+in vec2 uv;
+out vec4 frag_color;
+void main() {
+    float shadow = texture(sampler2DShadow(depth_texture, shadow_sampler), vec3(uv, lod_layer.x));
+    frag_color = vec4(shadow, shadow, shadow, 1.0);
+}
+@end
+@program shadow_compare tex_vs shadow_fs
+
+@fs border_fs
+layout(binding=0) uniform tex_fs_params { vec4 lod_layer; };
+layout(binding=0) uniform texture2D tex;
+layout(binding=0) uniform sampler smp;
+in vec2 uv;
+out vec4 frag_color;
+void main() { frag_color = textureLod(sampler2D(tex, smp), uv * 2.0 - 0.5, lod_layer.x); }
+@end
+@program border_sample tex_vs border_fs

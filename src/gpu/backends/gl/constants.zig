@@ -227,6 +227,7 @@ pub const texture_cube_map_seamless: u32 = 0x884F;
 pub const texture_fetch_barrier_bit: u32 = 0x00000008;
 pub const texture_mag_filter: u32 = 0x2800;
 pub const texture_max_anisotropy_ext: u32 = 0x84FE;
+pub const texture_base_level: u32 = 0x813C;
 pub const texture_max_level: u32 = 0x813D;
 pub const texture_max_lod: u32 = 0x813B;
 pub const texture_min_filter: u32 = 0x2801;

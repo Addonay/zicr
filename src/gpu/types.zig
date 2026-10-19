@@ -65,6 +65,8 @@ pub const Features = struct {
     vertexformat_int10_n2: bool = false,
     copy_buffer_to_image_relaxed_buffer_type: bool = false,
     copy_buffer_to_image_relaxed_bytes_per_row: bool = false,
+    /// Independent native GL mip/layer view objects. Without these, mip-only
+    /// views share backing texture range state and layer subsets are unsupported.
     gl_texture_views: bool = false,
 };
 pub const Limits = struct {
@@ -728,7 +730,15 @@ pub const FrameStatsWgpu = struct {
     uniforms: FrameStatsWgpuUniforms = .{},
     bindings: FrameStatsWgpuBindings = .{},
 };
+/// D3D12 submissions, including the blocking one-shot compatibility path.
+pub const FrameStatsD3d12 = struct {
+    num_queue_submits: u32 = 0,
+    num_one_shot_submits: u32 = 0,
+};
 pub const FrameStatsVk = struct {
+    num_pipeline_cache_header_repairs: u32 = 0,
+    num_queue_submits: u32 = 0,
+    num_queue_wait_idle: u32 = 0,
     num_cmd_pipeline_barrier: u32 = 0,
     num_allocate_memory: u32 = 0,
     num_free_memory: u32 = 0,
@@ -792,6 +802,7 @@ pub const FrameStats = struct {
     pipelines: FrameResourceStats = .{},
     gl: FrameStatsGl = .{},
     d3d11: FrameStatsD3d11 = .{},
+    d3d12: FrameStatsD3d12 = .{},
     metal: FrameStatsMetal = .{},
     wgpu: FrameStatsWgpu = .{},
     vk: FrameStatsVk = .{},
@@ -819,6 +830,8 @@ pub const D3d11Environment = struct {
     device_context: ?*const anyopaque = null,
 };
 pub const WgpuEnvironment = struct {
+    instance: ?*const anyopaque = null,
+    wait_timeout_ns: u64 = 0,
     device: ?*const anyopaque = null,
     /// Resolves webgpu.h functions by name, typically `wgpuGetProcAddress` of
     /// the WebGPU implementation (Dawn, wgpu-native or the browser shim).
@@ -874,6 +887,9 @@ pub const WgpuDesc = struct {
     bindgroups_cache_size: i32 = 0,
 };
 pub const VulkanDesc = struct {
+    pipeline_cache_data: Range = .{},
+    use_descriptor_buffer: bool = false,
+    descriptor_set_capacity: u32 = 4096,
     copy_staging_buffer_size: i32 = 0,
     transient_staging_buffer_size: i32 = 0,
     descriptor_buffer_size: i32 = 0,

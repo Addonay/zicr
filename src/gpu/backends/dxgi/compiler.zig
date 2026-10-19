@@ -1,7 +1,7 @@
 //! On-demand native HLSL compilation, from sokol_gfx.h:14668-14725.
 const std = @import("std");
 const Library = @import("../../platform/windows_library.zig").Library;
-const sdk = @import("sdk.zig");
+const sdk = @import("com.zig");
 const c = @import("constants.zig");
 const t = @import("../../types.zig");
 const e = @import("../../enums.zig");
@@ -35,7 +35,7 @@ pub const Compiler = struct {
     pub fn compile(self: *Compiler, shader: t.ShaderFunction, debugging: bool, logger: t.Logger) ?*sdk.Object {
         const previously_failed = self.load_failed;
         if (!self.ensureLoaded()) {
-            if (!previously_failed) log(logger, 1, .d3d11_load_d3dcompiler_47_dll_failed, null);
+            if (!previously_failed) log(logger, 1, .hlsl_load_compiler_failed, null);
             return null;
         }
         const source = shader.source orelse return null;
@@ -44,10 +44,10 @@ pub const Compiler = struct {
         var output: ?*sdk.Object = null;
         var diagnostics: ?*sdk.Object = null;
         const status = self.function.?(source, std.mem.len(source), shader.d3d11_filepath, null, @ptrFromInt(1), shader.entry orelse "main", target, flags, 0, &output, &diagnostics);
-        if (status < 0) log(logger, 1, .d3d11_shader_compilation_failed, null);
+        if (status < 0) log(logger, 1, .hlsl_compilation_failed, null);
         if (diagnostics) |blob| {
-            log(logger, 2, .d3d11_shader_compilation_output, null);
-            if (sdk.getBufferPointer(blob)) |text| log(logger, 3, .d3d11_shader_compilation_output, @ptrCast(text));
+            log(logger, 2, .hlsl_compilation_output, null);
+            if (sdk.getBufferPointer(blob)) |text| log(logger, 3, .hlsl_compilation_output, @ptrCast(text));
             sdk.release(blob);
         }
         if (status < 0) {

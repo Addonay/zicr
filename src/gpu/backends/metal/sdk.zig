@@ -22,6 +22,10 @@ pub const Uint = usize;
 
 const native = if (available) struct {
     extern fn objc_msgSend() void;
+    extern fn objc_msgSend_stret() void;
+    extern fn objc_autoreleasePoolPush() ?*anyopaque;
+    extern fn objc_autoreleasePoolPop(token: ?*anyopaque) void;
+    extern fn MTLCreateSystemDefaultDevice() Id;
     extern fn objc_getClass(name: [*:0]const u8) Id;
     extern fn sel_registerName(name: [*:0]const u8) Sel;
     extern fn objc_retain(obj: Id) Id;
@@ -32,6 +36,7 @@ const native = if (available) struct {
     extern fn dispatch_data_create(buffer: ?*const anyopaque, size: usize, queue: ?*anyopaque, destructor: ?*anyopaque) Id;
     // the isa of a block literal without captures, see globalBlock()
     extern var _NSConcreteGlobalBlock: u8;
+    extern var _NSConcreteStackBlock: u8;
 } else struct {};
 
 /// DISPATCH_TIME_FOREVER.
@@ -365,20 +370,24 @@ pub const gpu_family_metal3: Uint = 5001;
 pub fn selector(comptime name: [:0]const u8) Sel {
     if (comptime !available) return unavailable(Sel);
     const Cache = struct {
-        var value: Sel = null;
+        var value: std.atomic.Value(Sel) = .init(null);
     };
-    if (Cache.value == null) Cache.value = native.sel_registerName(name.ptr);
-    return Cache.value;
+    if (Cache.value.load(.acquire)) |value| return value;
+    const value = native.sel_registerName(name.ptr);
+    Cache.value.store(value, .release);
+    return value;
 }
 
 /// Returns the class object `name`, looked up once per call site and cached.
 pub fn cls(comptime name: [:0]const u8) Id {
     if (comptime !available) return unavailable(Id);
     const Cache = struct {
-        var value: Id = null;
+        var value: std.atomic.Value(Id) = .init(null);
     };
-    if (Cache.value == null) Cache.value = native.objc_getClass(name.ptr);
-    return Cache.value;
+    if (Cache.value.load(.acquire)) |value| return value;
+    const value = native.objc_getClass(name.ptr);
+    Cache.value.store(value, .release);
+    return value;
 }
 
 /// Sends `name` to `target` and returns the result of type `R`. `args` is a tuple of
@@ -401,7 +410,9 @@ pub fn msg(comptime R: type, target: Id, comptime name: [:0]const u8, args: anyt
         param_attrs[i + 2] = .{};
     }
     const Fn = @Fn(&param_types, &param_attrs, R, .{ .@"callconv" = .c });
-    const send: *const Fn = @ptrCast(&native.objc_msgSend);
+    const aggregate = @typeInfo(R) == .@"struct" or @typeInfo(R) == .@"union";
+    const stret = builtin.cpu.arch == .x86_64 and aggregate and @sizeOf(R) > 16;
+    const send: *const Fn = @ptrCast(if (stret) &native.objc_msgSend_stret else &native.objc_msgSend);
     return @call(.auto, send, .{ target, selector(name) } ++ args);
 }
 
@@ -488,3 +499,51 @@ pub fn globalBlock(comptime invoke: *const fn (?*anyopaque, Id) callconv(.c) voi
     };
     return @ptrCast(@constCast(&Static.literal));
 }
+
+/// A captured stack block. Metal copies its completion handler; the copy/dispose
+/// helpers retain the captured semaphore until the runtime releases that copy.
+pub const CompletionDescriptor = extern struct {
+    reserved: usize = 0,
+    size: usize = @sizeOf(CompletionBlock),
+    copy: *const fn (*CompletionBlock, *const CompletionBlock) callconv(.c) void,
+    dispose: *const fn (*const CompletionBlock) callconv(.c) void,
+};
+pub const CompletionBlock = extern struct {
+    isa: ?*const anyopaque,
+    flags: i32 = 1 << 25, // BLOCK_HAS_COPY_DISPOSE
+    reserved: i32 = 0,
+    invoke: *const fn (?*anyopaque, Id) callconv(.c) void,
+    descriptor: *const CompletionDescriptor,
+    semaphore: Id,
+    loss: ?*std.atomic.Value(i32),
+};
+fn copyCompletion(dst: *CompletionBlock, src: *const CompletionBlock) callconv(.c) void {
+    dst.semaphore = retain(src.semaphore);
+}
+fn disposeCompletion(block: *const CompletionBlock) callconv(.c) void {
+    release(block.semaphore);
+}
+pub fn completionBlock(comptime invoke: *const fn (?*anyopaque, Id) callconv(.c) void, semaphore: Id, loss: ?*std.atomic.Value(i32)) CompletionBlock {
+    const Static = struct {
+        const descriptor: CompletionDescriptor = .{ .copy = copyCompletion, .dispose = disposeCompletion };
+    };
+    return .{ .isa = if (available) @ptrCast(&native._NSConcreteStackBlock) else null, .invoke = invoke, .descriptor = &Static.descriptor, .semaphore = semaphore, .loss = loss };
+}
+
+/// An owned default Metal device for native hosts; release it with release().
+pub fn defaultDevice() Id {
+    if (comptime !available) return null;
+    return native.MTLCreateSystemDefaultDevice();
+}
+/// Headless hosts need an autorelease pool on every thread using Objective-C.
+/// Cocoa applications normally provide one through their event loop.
+pub const AutoreleasePool = struct {
+    token: ?*anyopaque,
+    pub fn init() AutoreleasePool {
+        return .{ .token = if (available) native.objc_autoreleasePoolPush() else null };
+    }
+    pub fn deinit(self: *AutoreleasePool) void {
+        if (comptime available) native.objc_autoreleasePoolPop(self.token);
+        self.* = undefined;
+    }
+};

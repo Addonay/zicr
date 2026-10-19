@@ -15,7 +15,7 @@ pub const Heap = struct {
     next: u32 = 0,
     free_list: std.ArrayList(u32) = .empty,
 
-    pub fn init(device: *sdk.Object, heap_type: u32, capacity: u32, shader_visible: bool) !Heap {
+    pub fn init(allocator: std.mem.Allocator, device: *sdk.Object, heap_type: u32, capacity: u32, shader_visible: bool) !Heap {
         const desc: sdk.DescriptorHeapDesc = .{
             .type = heap_type,
             .num_descriptors = capacity,
@@ -23,6 +23,9 @@ pub const Heap = struct {
         };
         var heap: Heap = .{ .capacity = capacity };
         if (sdk.createDescriptorHeap(device, &desc, &heap.object) < 0 or heap.object == null) return error.D3d12InitFailed;
+        errdefer sdk.release(heap.object);
+        // Freeing a descriptor must never allocate or silently lose a slot.
+        if (!shader_visible) try heap.free_list.ensureTotalCapacity(allocator, capacity);
         heap.start = sdk.heapStartCpu(heap.object.?);
         heap.gpu_start = if (shader_visible) sdk.heapStartGpu(heap.object.?) else 0;
         heap.increment = sdk.getDescriptorHandleIncrementSize(device, heap_type);
@@ -50,7 +53,8 @@ pub const Heap = struct {
     pub fn free(self: *Heap, allocator: std.mem.Allocator, descriptor: usize) void {
         if (descriptor == 0) return;
         const index: u32 = @intCast((descriptor - self.start) / self.increment);
-        self.free_list.append(allocator, index) catch {};
+        _ = allocator;
+        self.free_list.appendAssumeCapacity(index);
     }
 };
 
@@ -152,7 +156,17 @@ pub fn bufferDesc(size: usize, flags: u32) sdk.ResourceDesc {
 
 /// Waits until the fence reached `value`, blocking the calling thread.
 pub fn waitFence(fence: *sdk.Object, event: sdk.Handle, value: u64) void {
-    if (sdk.fenceCompletedValue(fence) >= value) return;
-    if (sdk.fenceSetEventOnCompletion(fence, value, event) < 0) return;
-    sdk.waitEvent(event, sdk.infinite);
+    while (true) {
+        const completed = sdk.fenceCompletedValue(fence);
+        if (completed == std.math.maxInt(u64)) {
+            @import("../../core.zig").recordLoss(@bitCast(@as(u32, 0x887a0005)));
+            return;
+        }
+        if (completed >= value) return;
+        // An event-registration failure (including OOM) is not completion. Keep
+        // the objects alive and retry/poll; a null event is a valid blocking wait.
+        if (sdk.fenceSetEventOnCompletion(fence, value, event) >= 0) {
+            if (event != null) sdk.waitEvent(event, sdk.infinite);
+        } else std.atomic.spinLoopHint();
+    }
 }

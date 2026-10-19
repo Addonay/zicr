@@ -33,6 +33,7 @@
     // internet connectivity.
     .dependencies = .{
         .sokol_tools_bin = .{
+            .lazy = true,
             .url = "git+https://github.com/floooh/sokol-tools-bin#b975d5642093d62e76a1e088bdae945d6d8b8ff2",
             .hash = "sokolshdc-0.1.0-r2KZDjW2UwOpu-g-yesxmX_xn0o4xpvd6x9lNUHHpJF4",
         },
@@ -45,6 +46,8 @@
         "tools",
         "sokol_gfx.h",
         "PORTING.md",
+        "README.md",
+        "TODO.md",
         // For example...
         //"LICENSE",
         //"README.md",

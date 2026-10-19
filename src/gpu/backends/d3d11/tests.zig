@@ -1,7 +1,7 @@
 const std = @import("std");
 const sdk = @import("sdk.zig");
-const c = @import("constants.zig");
-const convert = @import("convert.zig");
+const c = @import("../dxgi/constants.zig");
+const convert = @import("../dxgi/convert.zig");
 const e = @import("../../enums.zig");
 const t = @import("../../types.zig");
 const Backend = @import("backend.zig").Backend;
@@ -28,7 +28,7 @@ test "D3D11 filters and bind flags preserve native stage/resource capabilities" 
 
 test "native D3D11 functions compile without a Sokol dependency" {
     @setEvalBranchQuota(100_000);
-    inline for (.{ sdk, convert, Backend, @import("compiler.zig").Compiler }) |Namespace| {
+    inline for (.{ sdk, convert, Backend, @import("../dxgi/compiler.zig").Compiler }) |Namespace| {
         inline for (@typeInfo(Namespace).@"struct".decl_names) |name| {
             const declaration = @field(Namespace, name);
             if (@typeInfo(@TypeOf(declaration)) == .@"fn" and !@typeInfo(@TypeOf(declaration)).@"fn".is_generic) _ = &declaration;

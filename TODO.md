@@ -1,10 +1,124 @@
 # zicr TODO, concerns and implementation notes
 
-This document collects everything that is still open in zicr's GPU layer: the work
-planned next, the guides for the two browser backends, the concerns about each
-existing backend (including bugs found by reading the code that the scene suite
-does not catch yet), test gaps, and the test environment. It is meant to be read
-by whoever picks up the next piece of work, so it errs on the side of detail.
+This document keeps the original GPU-layer roadmap, browser integration guides,
+backend analysis and test environment alongside their implementation outcomes.
+The current completion audit comes first; the detailed historical analysis remains
+useful context for future renderer work.
+
+## Implementation completion (2026-10-19)
+
+The actionable GPU-layer implementation and all available validation are complete.
+[Acceptance audit](tasks/TODO_REQUIREMENTS.md), [dated evidence](tasks/TODO_COMPLETION.md)
+and [reproduction commands](tasks/VERIFICATION.md) map this original roadmap to the
+current tree. Historical analysis below is explicitly identified; its source
+excerpts refer to 254976a and are not current bug/status claims.
+
+- Both likely D3D12 lifetime/order bugs are fixed, with targeted regressions.
+  Uploads batch into the frame stream, copy layouts use GetCopyableFootprints,
+  descriptor overflow recovers, and root signatures negotiate 1.1/1.0.
+- Independent Devices own State and handles. Loss/recovery and threading contracts
+  are public. Owned asynchronous readback runs on every backend; native WebGPU's
+  blocking path borrows output safely instead of allocating/copying it twice.
+- Freestanding WebGL2/WebGPU bridges, native WebGPU/Dawn futures/error scopes,
+  portable Vulkan descriptor sets and optional descriptor buffers, pipeline caches,
+  synchronization validation, GL debug/legacy/mip views, shared DXGI/COM/HLSL,
+  Metal native hosts and complete Apple ABI checks are implemented.
+- The 64-scene suite includes lifetime/order, 128-frame randomized streams, churn,
+  exhaustion/recovery, compressed formats, sampler variants, dual-source/MSAA,
+  storage formats, base instance and large dispatch. Browser canvas and platform
+  window hosts verify final presentation-source pixels. Vulkan WSI uses per-image
+  semaphores and maintenance1 presentation fences for safe teardown.
+- Shader compiler overrides, reserved identifier checks, standalone `gpu` module
+  integration, public autodoc, compile-checked README usage and pinned CI definitions
+  are complete. Everything remains uncommitted for the user to review/commit.
+- [Performance evidence](bench/RESULTS.md) includes checked C/raw/public results,
+  profiles and variance. GL/D3D11 binding snapshots were reduced; Vulkan readback
+  prefers cached coherent memory with a coherent fallback. D3D11 Wine draw overhead
+  still measures above C; no blanket parity or fastest-backend claim is made.
+
+External gates remain real requirements: native Windows D3D12 debug/GPU validation
+and D3D11 removal evidence; Apple hardware/iOS execution and the Objective-C Metal
+benchmark's SDK build; non-Mesa/Android/mobile coverage; Firefox WebGPU adapter
+setup; remote CI execution. Wine DXGI window presentation faults in the tested
+Xvfb environment. Win32 Vulkan presentation passes without the unavailable Wine
+validation layer. These are not counted as passing native Windows/Apple results.
+
+Per-subresource aliasing, multithreaded recording into one Device, SM6/DXC/Slang,
+enhanced barriers, bindless/mesh/ray tracing and descriptor-table caching remain
+explicit future extensions/decisions, not features claimed by this implementation.
+
+## Implementation update (2026-10-17)
+
+The browser work below is now implemented; the original sections remain as design
+notes and a record of the problems being addressed. Source excerpts in those
+sections describe the original revision, not necessarily the current code.
+
+- [x] Freestanding WebGL2: `src/gpu/web.zig` resolves imports from the actual GL
+  dispatch types, and `tools/web/gl.js` implements object tables, extension
+  activation, shader source/log marshalling, uniforms, uploads and readback.
+  All three web capability checks now use `builtin.cpu.arch.isWasm()`.
+  Buffer readback uses `getBufferSubData`, not unavailable mapping calls.
+- [x] WebGL2 pixel readback uses canonical RGBA byte/float/integer data and repacks
+  channels and row pitches. Packed `rgb10a2`/`rg11b10f` reads explicitly fail
+  rather than lose bits. A dedicated readback FBO also fixes the duplicate
+  attachment failure exposed by the MRT scene in Chromium.
+- [x] Browser WebGPU: `tools/web/wgpu.js` decodes the used webgpu.h entry points.
+  Struct sizes, offsets, scalar kinds and enum values come from comptime metadata
+  in `src/gpu/web.zig`, evaluated for wasm32. Objects use reference-counted tables;
+  releasing a C reference does **not** call `destroy()`, because recorded GPU work
+  may still retain a resource. Optional features are requested before init.
+- [x] Owned readback tickets: `Device.requestReadBuffer`/`requestReadImage`,
+  `Readback.poll` and `deinit`. WebGPU submits copies and maps asynchronously;
+  other backends currently use their synchronous read path behind the ticket.
+  Native WebGPU callbacks hold heap state rather than stack-local userdata,
+  including after abandonment/timeouts. Backend teardown drains pending native
+  callbacks before its driver functions may be unloaded.
+- [x] Browser harness: `zig build check-scenes-web`, `test-web`,
+  `test-web-webgl2`, `test-web-wgpu`. No Emscripten, JSPI, npm packages or shared
+  memory required. Node launches an isolated Chromium process and waits for
+  `window.__zicr_results`; missing/incomplete results fail the command.
+  Use `CHROMIUM=/path/to/chromium` when the default `google-chrome` isn't installed.
+  The WebGPU harness replays deterministic scenes at readback checkpoints, retaining
+  completed snapshots, so the existing CPU assertions run after asynchronous maps.
+  Production applications should keep tickets across frames, rather than replay.
+- [x] D3D12 upload ordering/lifetime (6.2, 6.3): initial uploads and unsealed
+  writes recorded during an open frame now use that same list. Temporary upload
+  resources are retired against the frame fence. One-shot lists assert no frame
+  is open. Consequently a one-shot upload cannot advance the shared fence ahead
+  of a pending frame's retirement tags. Retirement capacity is reserved
+  before every resource creation/upload for all live pool slots, plus a temporary
+  upload. Destruction never allocates or immediately releases on OOM; creation
+  fails safely if this reserve cannot be maintained.
+- [x] Unsealed binding semantics verified: the core already skips draws using
+  unsealed resources, even without descriptor validation. `unsealed_draw_skipped`
+  checks this and sealing makes subsequent draws work. It was not a supported
+  way to modify a buffer between two draws as hypothesized in 6.3.
+- [x] D3D12 descriptor free lists reserve capacity at heap creation, so freeing
+  cannot allocate or silently leak a slot. COM calls reject struct return types
+  unless an explicit hidden result pointer is used.
+- [x] Added `destroy_then_upload`, `unsealed_draw_skipped`, `many_frames`
+  (100 frames), and `readback_regions` (padded rows and an unaligned buffer range).
+  There are now 33 scenes. Added ticket bounds/ownership and callback abandonment
+  tests, including failed mappings.
+- [x] Windows Vulkan harness loads `vulkan-1.dll` through `WindowsLibrary` and
+  is included in the Windows scene runner. All 33 scenes also passed through
+  that loader under Wine; native Windows remains unverified.
+- [x] Scene runner accepts `--portable-limits`; Linux defaults also request
+  the legacy GL/GLES variants. EGL may return a newer version than requested;
+  strict minimum-version runs still need driver version overrides. The generated
+  desktop shader target is GLSL 4.10, so a strict GL 3.3 scene run still needs
+  a shader fallback; its hand-written smoke shaders remain the minimum test.
+
+Remaining gates: native Windows D3D12 debug/GPU validation and WARP, Firefox and
+hardware browser runs, Metal runtime testing, device-loss recovery, truly
+non-blocking tickets for other backends, and the larger architectural/performance
+work in sections 8–16. D3D11 has **not** been removed: its native-Windows gate
+in section 7 remains unsatisfied. The shared DXGI/HLSL extraction remains open.
+
+Current browser evidence: Chromium/SwiftShader runs 29 WebGL2 scenes successfully
+with four expected skips (base vertex and three compute scenes), and all 33 WebGPU
+scenes successfully, with GL error checks / WebGPU uncaptured errors enabled.
+This is software-driver coverage, not evidence about every browser or GPU.
 
 File references are written as `path:line` against commit `254976a` ("Add the
 D3D12 backend"); line numbers drift as code changes, so search for the quoted code
@@ -69,18 +183,23 @@ That sentence decides most trade-offs in this document:
 
 ## 2. Where things stand
 
-| Backend | Code | Scene suite (29 scenes) | Native validation | Verified on |
+The table below records the original audit revision. Current backend evidence
+is in [README.md](README.md) and the [acceptance audit](tasks/TODO_REQUIREMENTS.md).
+
+**Historical analysis against 254976a follows:**
+
+| Backend | Code | Scene suite (33 scenes) | Native validation | Verified on |
 | --- | --- | --- | --- | --- |
-| OpenGL 4.6 | port of sokol | 29/29 | none (GL has no validation layer; KHR_debug is not wired up, see 10.4) | Mesa 26.2.4, AMD RENOIR |
-| GLES 3.2 | port of sokol | 29/29 | none | Mesa 26.2.4 |
+| OpenGL 4.6 | port of sokol | 33/33 | none (GL has no validation layer; KHR_debug is not wired up, see 10.4) | Mesa 26.2.4, AMD RENOIR |
+| GLES 3.2 | port of sokol | 33/33 | none | Mesa 26.2.4 |
 | GL 3.3 / GLES 3.0 ("legacy") | port of sokol | smoke tests only | none | Mesa 26.2.4 |
-| Vulkan 1.3 | port of sokol | 29/29 | Khronos validation layer, clean | RADV (AMD), lavapipe (CPU) |
-| WebGPU, native | port of sokol | 29/29 | wgpu error callbacks, clean | wgpu-native v29.0.1.1 |
-| D3D11 | port of sokol | 29/29 | none under DXVK | Wine 11 + DXVK 2.7.1 |
-| D3D12 | new (no sokol code) | 29/29 | info queue unavailable; Vulkan layer under vkd3d-proton shows only vkd3d-proton's own errors | Wine 11 + vkd3d-proton (from Proton Experimental) |
+| Vulkan 1.3 | port of sokol | 33/33 | Khronos validation layer, clean | RADV (AMD), lavapipe (CPU) |
+| WebGPU, native | port of sokol | 33/33 | wgpu error callbacks, clean | wgpu-native v29.0.1.1 |
+| D3D11 | port of sokol | 33/33 | none under DXVK | Wine 11 + DXVK 2.7.1 |
+| D3D12 | new (no sokol code) | 33/33 | info queue unavailable; Vulkan layer under vkd3d-proton shows only vkd3d-proton's own errors | Wine 11 + vkd3d-proton (from Proton Experimental) |
 | Metal | port of sokol | not run | n/a | type-checked for macOS and iOS only |
-| WebGL2 | not started | | | |
-| WebGPU, browser | not started | | | |
+| WebGL2 | freestanding bridge | 29 pass, 4 capability skips | GL errors | Chromium / ANGLE SwiftShader |
+| WebGPU, browser | freestanding bridge | 33/33 | uncaptured-error events | Chromium / SwiftShader |
 
 Scenes (`tools/scenes/scenes.zig`): clear, triangles, indexed_uint16,
 indexed_uint32_base_vertex, instancing, uniform_updates, scissor, viewport,
@@ -88,13 +207,14 @@ blend_alpha, blend_max, depth_test, stencil, texture_2d, texture_mip_levels,
 texture_array, texture_3d, texture_cube, render_to_texture, msaa_resolve,
 multiple_render_targets, write_buffer_transient, write_image_transient,
 write_unsealed, copy_buffer_to_buffer, copy_buffer_to_image, render_formats,
-compute_buffer, compute_image, compute_to_vertex.
+compute_buffer, compute_image, compute_to_vertex, destroy_then_upload,
+unsealed_draw_skipped, many_frames, readback_regions.
 
 Other suites:
 
-- `zig build test`: 56 unit tests (`src/gpu/tests.zig`) and 9 public API tests
+- `zig build test`: 57 unit tests (`src/gpu/tests.zig`) and 10 public API tests
   (`src/gpu/api_tests.zig`).
-- `zig build test-upstream`: 207 tests ported from upstream
+- `zig build test-upstream`: 208 tests ported from upstream
   `tests/functional/sokol_gfx_test.c`, 0 skipped, 1500 assertions (the same count
   as the C file).
 - `zig build test-diff`: the differential fuzzer (`tools/diff/fuzz.zig`) drives
@@ -123,8 +243,8 @@ suites catch):
 ## 3. WebGL2 in the browser
 
 The plan is to run the existing GL backend in the browser through WebGL2, with our
-own small JavaScript shim instead of Emscripten. This section is a guide to doing
-that; it lists everything in the current GL backend that will not survive contact
+own small JavaScript shim instead of Emscripten. The implementation is in `tools/web/gl.js` and `src/gpu/web.zig`. The
+original guide below explains its design; it lists everything in the current GL backend that will not survive contact
 with WebGL2.
 
 ### 3.1 How the GL backend gets its functions
@@ -591,9 +711,9 @@ GetResourceAllocationInfo`, `GetAdapterLuid`, `GetCustomHeapProperties`) needs t
 same treatment. A comptime check in `sdk.zig` that refuses `invoke` with a
 struct return type would make the mistake impossible.
 
-### 6.2 Suspected bug: deferred release can free resources the GPU still uses
+### 6.2 Fixed in current tree (historical bug): deferred release can free resources the GPU still uses
 
-**Found by reading the code; not reproduced by a scene yet.**
+**Historical analysis. Current uploads use the open frame list; see the implementation update and `destroy_then_upload`.**
 
 `releaseLater` tags a COM object with "the next fence value":
 
@@ -632,7 +752,7 @@ Also: when `deferred.append` fails, the code releases immediately
 out-of-memory situation; it should wait for idle first (`collectDeferred(true)`)
 instead.
 
-### 6.3 Suspected issue: one-shot writes reorder against the open frame
+### 6.3 Addressed in current tree (historical concern): one-shot writes reorder against the open frame
 
 Unsealed writes and initial data go through a separate command list that executes
 immediately (`commands.zig:365-377`), while the frame's command list executes only
@@ -659,6 +779,15 @@ writes. Decide the rule in the public API docs, then add a scene for it.
 
 ### 6.4 One-shot uploads stall the CPU
 
+Current: initial and unsealed uploads now join the frame command stream on D3D12
+and Vulkan. Submission-count and immediate-read regressions pass; see the
+[completion ledger](tasks/TODO_COMPLETION.md).
+
+**Historical analysis against 254976a follows:**
+
+Uploads inside an open frame are now recorded in that frame; the concern below
+still applies to bulk loading before a frame is open.
+
 Every buffer or image created with data, and every unsealed write, does
 `ExecuteCommandLists` + `Signal` + wait (`endOneShot`). Loading 1,000 textures
 means 1,000 full GPU round trips. Fine for tests; slow for a renderer loading a
@@ -682,6 +811,12 @@ want it. Per-subresource tracking (or enhanced barriers,
 
 ### 6.6 Root signatures and descriptor copies
 
+Current: D3D12 negotiates root signature 1.1, preserves a 1.0 fallback, and has
+real descriptor-ring overflow/recovery coverage. Table caching remains an optional profiling-driven
+optimization, rather than an unchecked correctness requirement.
+
+**Historical analysis against 254976a follows:**
+
 - Root signature version 1.0 (`D3D12SerializeRootSignature`) treats all descriptors
   as volatile. Version 1.1 (`D3D12SerializeVersionedRootSignature`) lets the
   driver assume descriptors and data are static while a command list executes
@@ -698,6 +833,12 @@ want it. Per-subresource tracking (or enhanced barriers,
   the draw, never write past the ring.
 
 ### 6.7 Shaders: FXC and shader model 5.0 only
+
+Current: compiler/COM/DXGI code lives in backends/dxgi, with neutral HLSL
+diagnostics. FXC/SM5 remains the supported path. SM6/DXC/Slang selection is an
+explicit future renderer decision, not an implemented or advertised feature.
+
+**Historical analysis against 254976a follows:**
 
 D3D12 shaders are compiled at runtime with `D3DCompile` from `d3dcompiler_47.dll`
 (shared code in `src/gpu/backends/d3d11/compiler.zig:18-19`) to DXBC shader model
@@ -728,6 +869,11 @@ replacement.
 
 ### 6.9 Texture footprints are computed by hand
 
+Current: D3D12 uses GetCopyableFootprints for authoritative layouts. Descriptor
+returns no longer allocate, and BC1-7/ETC2/ASTC have sampling regressions.
+
+**Historical analysis against 254976a follows:**
+
 The design said `GetCopyableFootprints`; the implementation computes footprints
 analytically (256-byte row pitch alignment, 512-byte placement alignment,
 `commands.zig:330-335`). That's correct for the formats the scenes use, but
@@ -755,6 +901,13 @@ loses a descriptor slot when the append fails.
   a device is removed.
 
 ### 6.11 Things not exercised at all
+
+Current: loss/recovery, WARP, GPU-preference discovery, owned asynchronous
+readback and platform window hosts are implemented. Wine offscreen tests pass;
+DXGI presentation faults in this test environment and native Windows GPU-based
+validation remains an external gate.
+
+**Historical analysis against 254976a follows:**
 
 - **Swapchain passes.** The code path exists (`commands.zig:64-80`: RTV/DSV in
   reserved per-frame slots, `PRESENT` ↔ `RENDER_TARGET` transitions) but no scene
@@ -817,6 +970,13 @@ Microsoft's runtime or a Windows driver. The D3D11 debug layer
 share the same caveat; neither is a better-verified fallback than the other.
 
 ### 7.2 D3D12 reuses D3D11 code
+
+Current: shared code has been extracted to backends/dxgi. D3D12 imports no
+D3D11 implementation. D3D11 stays until native Windows D3D12 validation evidence
+satisfies the removal checklist; the source extraction is not permission to
+remove that verification gate.
+
+**Historical analysis against 254976a follows:**
 
 The D3D12 backend imports from the D3D11 directory:
 
@@ -882,6 +1042,11 @@ restored if a real user needs it.
 
 ### 8.1 It requires `VK_EXT_descriptor_buffer`
 
+Current: descriptor sets are the default and do not enable that extension.
+Descriptor buffers are an opt-in strategy; both run the shared scene suite.
+
+**Historical analysis against 254976a follows:**
+
 The Vulkan backend (ported from sokol) uses descriptor buffers, not descriptor
 sets:
 
@@ -902,6 +1067,11 @@ second binding strategy selected at init.
 
 ### 8.2 No Vulkan on Windows in the scene suite
 
+Current: Windows Vulkan scenes are cross-built and run through Wine. Native
+Windows driver verification remains separate.
+
+**Historical analysis against 254976a follows:**
+
 `tools/harness/vulkan.zig` uses `std.DynLib`, which Zig 0.17 doesn't support on
 Windows, so the harness is Linux-only (`harness.zig`: `if (builtin.os.tag ==
 .linux)`), and the Windows scene build drops the `vulkan` variant even though
@@ -918,6 +1088,11 @@ issues, but running on at least one non-Mesa driver matters.
 
 ### 8.4 Smaller items
 
+Current: synchronization validation, frame upload batching and compatible
+pipeline-cache persistence are implemented and exercised.
+
+**Historical analysis against 254976a follows:**
+
 - Synchronization validation (`VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT`)
   is not enabled in the harness; it finds missing barriers and hazards that the
   default validation doesn't. Enable it for a run and fix what it reports.
@@ -930,14 +1105,22 @@ issues, but running on at least one non-Mesa driver matters.
 
 ## 9. WebGPU (native)
 
+Current: wgpu-native v29 and Dawn 67d4d6e pass the native suite. Dawn uses
+TimedWaitAny-enabled instances; shader error scopes fail cleanly and recovery is
+tested. See [native provider reproduction](tools/webgpu/README.md).
+
+**Historical analysis against 254976a follows:**
+
 - **wgpu-native only.** Dawn (Chrome's implementation, also usable natively) has
   not been tried. Both implement `webgpu.h`, but they disagree in corners
   (default limits, error reporting, how callbacks fire). Running the scenes on
   Dawn would catch zicr code that depends on wgpu-native behavior, and Dawn is
   closer to what the browser backend will see.
-- **The map wait spins.** `awaitMap` (`backend.zig:1580-1597`) polls with
-  `wgpuDevicePoll` when the library has it, and otherwise spins up to `1 << 26`
-  times with `spinLoopHint`. With Dawn, the right tool is `wgpuInstanceWaitAny` with
+- **The native synchronous map wait still spins without device polling.**
+  `waitRead` polls with `wgpuDevicePoll` when the library has it, and otherwise
+  spins up to `1 << 26` times with `spinLoopHint`. Callback userdata is now
+  heap-owned so timeout does not leave a dangling pointer. Prefer owned tickets
+  for normal rendering. With Dawn, the right tool is `wgpuInstanceWaitAny` with
   a `WGPUFuture` (`WGPUCallbackMode_WaitAnyOnly`), the standard `webgpu.h` way to
   block on a future. Moving to futures would make the backend portable across
   wgpu-native and Dawn.
@@ -969,6 +1152,12 @@ on Linux, Vulkan covers it.
 
 ### 10.2 Texture views need GL 4.3
 
+Current: GL/GLES/WebGL without native views emulate sampled mip ranges.
+Conflicting simultaneous ranges reject bindings; unsupported layer subsets reject
+creation. Absolute readback/attachment use restores the full mip range.
+
+**Historical analysis against 254976a follows:**
+
 Views with a mip or layer range need `glTextureView` (GL 4.3,
 `backend.zig:69`). Without it, which includes all of GLES and WebGL2, a view's mip
 range is ignored and the whole texture is bound (documented sokol behavior). The
@@ -985,12 +1174,23 @@ not worth testing beyond "it compiles".
 
 ### 10.4 No GL debug output in the harness
 
+Current: advertised debug callbacks are installed and their error/high/medium
+diagnostics fail scenes. Strict validation flags fail if the callback is absent.
+
+**Historical analysis against 254976a follows:**
+
 The GL harness counts no native errors (GL has no validation layer). Wiring
 `KHR_debug` (`glDebugMessageCallback`, with a debug context created through EGL)
 into `tools/harness/egl.zig` would give GL the same "native errors fail the scene"
 rule as Vulkan and WebGPU. Mesa's debug output reports many real misuse cases.
 
 ### 10.5 GL legacy contexts
+
+Current: actual GL3.3/GLSL330 and GLES3.0 contexts have dedicated variants and
+CI commands. Generated GL330 render descriptors preserve interfaces; unsupported
+shader operations are still rejected by the real native compiler.
+
+**Historical analysis against 254976a follows:**
 
 GL 3.3 and GLES 3.0 contexts (`gl_legacy`, `gles_legacy` variants) pass the smoke
 tests but aren't in the default scene run. Add them to `platform_variants` on
@@ -999,6 +1199,12 @@ Linux (GLES 3.0 is also the closest native approximation of WebGL2).
 ---
 
 ## 11. Metal
+
+Current: native offscreen and macOS window hosts, all-scene Apple ABI checks,
+owned native readback, and Metal CI gates are implemented. C/raw/public benchmark
+tooling requires the Apple SDK. Apple hardware execution remains unverified.
+
+**Historical analysis against 254976a follows:**
 
 The Metal backend is a port of sokol's and has been type-checked for macOS and
 iOS (`zig build check-metal`), but it has never run. Type checking catches
@@ -1027,6 +1233,12 @@ Until it runs, Metal should be listed as unverified, as the README does.
 
 ### 12.1 One device per process
 
+Current: Device owns its State and resource pools; owner-tagged handles reject
+cross-device use. Independent/interleaved/threaded device tests pass. The raw
+singleton compatibility API is separate.
+
+**Historical analysis against 254976a follows:**
+
 The public API wraps sokol's global state:
 
 ```zig
@@ -1048,19 +1260,45 @@ backends, best done before the renderer is written on top.
 
 ### 12.2 Threading
 
+Current: independent Devices may be used on separate owner threads. A Device
+records commands on its owner thread; GL hosts must also maintain native context
+currentness. notifyLost is the documented cross-thread exception. Concurrent
+recording into one Device remains a future API extension.
+
+**Historical analysis against 254976a follows:**
+
 Nothing in zicr is thread-safe, as in sokol. That's a fine rule for a first
 version, but it must be documented in the public API, and the renderer will want
 at least: resource creation from loader threads, and command recording on
 several threads (D3D12, Vulkan and Metal all support it natively). The design of
 the per-device state (12.1) should leave room for it.
 
-### 12.3 Readback is synchronous
+### 12.3 Readback and tickets
+
+Current: owned tickets use native asynchronous completion on every backend.
+Cancelled GPU copies remain device-owned until completion; Vulkan transient fence
+query errors cannot prematurely retire resources. Browser WebGPU polls between
+event-loop turns.
+
+**Historical analysis against 254976a follows:**
+
+`requestReadBuffer` / `requestReadImage` now return owned tickets. WebGPU maps
+asynchronously; `poll` returns null until ready. Other backends still implement
+tickets through the synchronous path, so their non-blocking implementation remains
+open. The original concern below now applies to those backends and synchronous
+calls specifically.
 
 `Device.readBuffer`/`readImage` wait for the GPU. That is correct for tests and
 for tools, wrong for a renderer's per-frame reads (GPU picking, occlusion results,
 timings), and impossible in the browser (4.3). Add an asynchronous readback API.
 
 ### 12.4 Errors and device loss
+
+Current: sticky per-device loss status and owner-thread notification are public.
+Recreate a Device and its resources to recover; old owner-tagged handles cannot
+alias the replacement device. Native hardware-induced loss remains a runtime gate.
+
+**Historical analysis against 254976a follows:**
 
 Resource creation returns `error.PoolExhausted`, `error.InvalidDescriptor`,
 `error.CreationFailed`. Commands with invalid state are skipped and reported.
@@ -1115,6 +1353,11 @@ module per input file. Slang sets (`build.zig:178-181`):
 
 ### 13.3 Reserved words across targets
 
+Current: the generator rejects reflected identifiers reserved by WGSL, HLSL
+or MSL, including numeric vector/matrix type families, before module generation.
+
+**Historical analysis against 254976a follows:**
+
 A storage image named `target` in `tools/scenes/compute.glsl` compiled fine for
 GLSL, HLSL, MSL and SPIR-V, but `target` is reserved in WGSL, and sokol-shdc
 passed it through unchanged. wgpu-native rejected the shader at queue submit and
@@ -1136,6 +1379,13 @@ runtime abort into a build error.
 ---
 
 ## 14. Test suite gaps
+
+Current: lifetime/order, multiframe/churn/exhaustion, compressed formats,
+samplers, dual-source/MSAA/storage formats/base-instance and large-dispatch tests
+are implemented. Real-backend seeded streams and platform presentation hosts have
+been added; see the acceptance audit for passing runs versus external gates.
+
+**Historical analysis against 254976a follows:**
 
 Scenes that would have caught or will catch real problems:
 
@@ -1166,6 +1416,13 @@ Scenes that would have caught or will catch real problems:
 
 ## 15. Performance
 
+Current: checked C/raw/public baselines exist for GL, Vulkan, native WebGPU
+and D3D11 through Wine, with retained raw samples and profiles. Metal tooling has
+a native SDK/CI gate. See [bench/RESULTS.md](bench/RESULTS.md), including allocator
+methodology corrections and measured overhead rather than blanket speed claims.
+
+**Historical analysis against 254976a follows:**
+
 Nothing has been measured yet. The goal is "the best and fastest", and the first
 baseline is C sokol_gfx on the same machine:
 
@@ -1189,10 +1446,15 @@ size `bindgroups_cache_size = 1024`).
 
 ## 16. Documentation and housekeeping
 
-- **PORTING.md is out of date.** It still describes the `complete-port` stage: the
-  module `sokol_gfx`, `root.zig`, `gfx.setup(...)`. It should describe the current
-  layout (`src/gpu/`, `internal.zig`, `zicr.gpu.raw`) and keep the section-by-
-  section mapping to sokol_gfx.h, which is still accurate.
+Current: public API comments/autodoc, CONTRACT/DESIGN updates and pinned
+Linux/Windows/macOS CI definitions are implemented. Remote CI execution is still
+an external gate; final reconciliation is tracked in the acceptance audit.
+
+**Historical analysis against 254976a follows:**
+
+- **PORTING.md updated in the current tree:** current `zicr.gpu`/`raw` entry
+  points, `src/gpu/` layout, D3D12 and browser additions, with the source-section
+  mapping retained.
 - **The public API needs doc comments** on every type and function in
   `src/gpu/gpu.zig`, written for zicr users, not in sokol terms. `zig build docs`
   (Zig's autodoc) could then publish them.

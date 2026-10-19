@@ -237,6 +237,7 @@ pub const IMAGE_CREATE_CUBE_COMPATIBLE_BIT: u32 = 0x00000010;
 pub const MEMORY_PROPERTY_DEVICE_LOCAL_BIT: u32 = 0x00000001;
 pub const MEMORY_PROPERTY_HOST_VISIBLE_BIT: u32 = 0x00000002;
 pub const MEMORY_PROPERTY_HOST_COHERENT_BIT: u32 = 0x00000004;
+pub const MEMORY_PROPERTY_HOST_CACHED_BIT: u32 = 0x00000008;
 pub const MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT: u32 = 0x00000002;
 pub const COMMAND_POOL_CREATE_TRANSIENT_BIT: u32 = 0x00000001;
 pub const COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT: u32 = 0x00000002;
@@ -1293,6 +1294,16 @@ pub const InstanceFns = struct {
 /// Device-level entry points, resolved with `vkGetDeviceProcAddr(device, name)`.
 /// Optional fields belong to extensions and may be absent.
 pub const DeviceFns = struct {
+    vkGetFenceStatus: *const fn (Device, Fence) callconv(.c) i32 = undefined,
+    vkCreatePipelineCache: *const fn (Device, *const PipelineCacheCreateInfo, ?*const AllocationCallbacks, *PipelineCache) callconv(.c) i32 = undefined,
+    vkDestroyPipelineCache: *const fn (Device, PipelineCache, ?*const AllocationCallbacks) callconv(.c) void = undefined,
+    vkGetPipelineCacheData: *const fn (Device, PipelineCache, *usize, ?*anyopaque) callconv(.c) i32 = undefined,
+    vkCreateDescriptorPool: *const fn (Device, *const DescriptorPoolCreateInfo, ?*const AllocationCallbacks, *DescriptorPool) callconv(.c) i32 = undefined,
+    vkDestroyDescriptorPool: *const fn (Device, DescriptorPool, ?*const AllocationCallbacks) callconv(.c) void = undefined,
+    vkResetDescriptorPool: *const fn (Device, DescriptorPool, u32) callconv(.c) i32 = undefined,
+    vkAllocateDescriptorSets: *const fn (Device, *const DescriptorSetAllocateInfo, [*]DescriptorSet) callconv(.c) i32 = undefined,
+    vkUpdateDescriptorSets: *const fn (Device, u32, [*]const WriteDescriptorSet, u32, ?*const anyopaque) callconv(.c) void = undefined,
+    vkCmdBindDescriptorSets: *const fn (CommandBuffer, i32, PipelineLayout, u32, u32, [*]const DescriptorSet, u32, ?[*]const u32) callconv(.c) void = undefined,
     vkDeviceWaitIdle: *const fn (Device) callconv(.c) i32 = undefined,
     vkCreateBuffer: *const fn (Device, *const BufferCreateInfo, ?*const AllocationCallbacks, *Buffer) callconv(.c) i32 = undefined,
     vkDestroyBuffer: *const fn (Device, Buffer, ?*const AllocationCallbacks) callconv(.c) void = undefined,
@@ -1383,4 +1394,43 @@ pub const Dispatch = struct {
         const get_device: GetDeviceProcAddr = @ptrCast(@alignCast(get_instance(instance, "vkGetDeviceProcAddr") orelse return error.MissingVulkanFunction));
         try loadFns(DeviceFns, &self.device, get_device, device);
     }
+};
+
+pub const DescriptorPool = u64;
+pub const DescriptorSet = u64;
+pub const DescriptorPoolSize = extern struct { type: i32, descriptorCount: u32 };
+pub const DescriptorPoolCreateInfo = extern struct {
+    sType: i32 = 33,
+    pNext: ?*const anyopaque = null,
+    flags: u32 = 0,
+    maxSets: u32,
+    poolSizeCount: u32,
+    pPoolSizes: [*]const DescriptorPoolSize,
+};
+pub const DescriptorSetAllocateInfo = extern struct {
+    sType: i32 = 34,
+    pNext: ?*const anyopaque = null,
+    descriptorPool: DescriptorPool,
+    descriptorSetCount: u32,
+    pSetLayouts: [*]const DescriptorSetLayout,
+};
+pub const WriteDescriptorSet = extern struct {
+    sType: i32 = 35,
+    pNext: ?*const anyopaque = null,
+    dstSet: DescriptorSet = 0,
+    dstBinding: u32 = 0,
+    dstArrayElement: u32 = 0,
+    descriptorCount: u32 = 1,
+    descriptorType: i32 = 0,
+    pImageInfo: ?[*]const DescriptorImageInfo = null,
+    pBufferInfo: ?[*]const DescriptorBufferInfo = null,
+    pTexelBufferView: ?[*]const u64 = null,
+};
+
+pub const PipelineCacheCreateInfo = extern struct {
+    sType: i32 = 17,
+    pNext: ?*const anyopaque = null,
+    flags: u32 = 0,
+    initialDataSize: usize = 0,
+    pInitialData: ?*const anyopaque = null,
 };

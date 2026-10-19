@@ -83,6 +83,7 @@ pub const FrameStatsD3d11Bindings = types.FrameStatsD3d11Bindings;
 pub const FrameStatsD3d11Uniforms = types.FrameStatsD3d11Uniforms;
 pub const FrameStatsD3d11Draw = types.FrameStatsD3d11Draw;
 pub const FrameStatsD3d11 = types.FrameStatsD3d11;
+pub const FrameStatsD3d12 = types.FrameStatsD3d12;
 pub const FrameStatsMetalIdpool = types.FrameStatsMetalIdpool;
 pub const FrameStatsMetalPipeline = types.FrameStatsMetalPipeline;
 pub const FrameStatsMetalBindings = types.FrameStatsMetalBindings;
@@ -346,7 +347,10 @@ pub const glQueryViewInfo = api.glQueryViewInfo;
 
 /// Native driver interoperation types; no Sokol C implementation is involved.
 pub const native = struct {
+    pub const vulkan = @import("backends/vulkan/sdk.zig");
     pub const d3d11 = @import("backends/d3d11/sdk.zig");
     pub const d3d12 = @import("backends/d3d12/sdk.zig");
+    pub const metal = @import("backends/metal/sdk.zig");
+    pub const dxgi = @import("backends/dxgi/factory.zig");
     pub const WindowsLibrary = @import("platform/windows_library.zig").Library;
 };

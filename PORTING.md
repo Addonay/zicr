@@ -1,14 +1,20 @@
-# Native sokol_gfx port
+# zicr GPU implementation lineage
 
-A native Zig translation of the bundled `sokol_gfx.h` by Andre Weissflog. The
+The low-level GPU layer began as a native Zig translation of the bundled `sokol_gfx.h` by Andre Weissflog. The
 original header remains the implementation reference. There are no C imports, C
 compilation steps or extern Sokol functions; driver APIs are called through native
-Zig function pointers (GL, Vulkan, WebGPU), COM vtables (D3D11) or the Objective-C
+Zig function pointers (GL, Vulkan, WebGPU), COM vtables (D3D11/D3D12) or the Objective-C
 runtime (Metal, Apple targets only).
 
 Reference header SHA-256: `6af70de1a768ac3ff85f4c0a145c2e8e702abd5f101c2ad005b69ef69d5094f0`.
 
 ## Layout
+
+Paths in this table are relative to `src/gpu/`. The library root is
+`src/zicr.zig`, which exposes the user-facing API as `zicr.gpu`. The raw
+sokol-shaped entry points are exported through `internal.zig` as `zicr.gpu.raw`
+for upstream tests, differential fuzzing and port maintenance.
+
 
 | Source section | Native code |
 | --- | --- |
@@ -26,20 +32,26 @@ Reference header SHA-256: `6af70de1a768ac3ff85f4c0a145c2e8e702abd5f101c2ad005b69
 | Generic backend dispatch, 24132–24741 | `backend.zig` |
 | Validation, 24749–26691 | `validation.zig` (all 399 `VALIDATE_*` checks) |
 | Defaults and resource lifecycle, 26699–27409 | `defaults.zig`, `api.zig` |
-| Public API, 27418–29545 | `api.zig`, exported by `root.zig` (154/154 entry points) |
+| Public API, 27418–29545 | `api.zig`, exported by `internal.zig` (154/154 entry points) |
 
 `backends/CONTRACT.md` describes the interface between the core and a backend.
 
 ## Native API choices
 
-The build exposes the module `sokol_gfx`. Descriptors are passed by value, function
-names are camelCase and type names PascalCase. The backend is chosen at setup and
-dispatched through a tagged union; the original picks one at compile time:
+The build exposes `zicr`, with the public `gpu.Device` API in `src/gpu/root.zig`.
+Descriptors use slices, optionals and tagged unions; creation returns error
+unions and draw commands are grouped into pass objects. Native handles remain
+application-owned. The public example and shader build integration are in
+[README.md](README.md).
+
+The raw port retains the original descriptor shapes and camelCase entry points.
+Its backend is chosen at setup and dispatched through a tagged union; the
+original C header picks one at compile time:
 
 ```zig
-const gfx = @import("sokol_gfx");
-try gfx.setup(allocator, .vulkan, .{ .environment = .{ .vulkan = .{ ... } } });
-defer gfx.shutdown();
+const raw = @import("zicr").gpu.raw;
+try raw.setup(allocator, .vulkan, .{ .environment = .{ .vulkan = vk_environment } });
+defer raw.shutdown();
 ```
 
 - Setup takes a `std.mem.Allocator`; legacy allocation callbacks in `Desc.allocator`
@@ -79,10 +91,13 @@ defer gfx.shutdown();
 
 | Command | What it checks |
 | --- | --- |
-| `zig build test` | 57 unit tests: pools, defaults, validation diagnostics, lifecycle, GL/D3D11 mocks (Debug/Safe: 57 pass; Fast/Small: 44 pass, 13 validation tests skip) |
+| `zig build test` | unit and public API tests, including readback ownership and asynchronous mapping cancellation |
 | `zig build test-gl` (`-- --legacy`) | GL 4.6 and GLES 3.2 (and 3.3 / ES 3.0) through surfaceless EGL on Mesa |
 | `zig build test-vk` | Vulkan, 10 scenarios with exact readback |
 | `WGPU_NATIVE_LIB=... zig build test-wgpu` | WebGPU through wgpu-native, 14 scenarios, both bindgroup cache modes |
+| `zig build test-scenes` | 33 cross-backend CPU-checked scenes; `-- --portable-limits` enables portable caps |
+| `zig build test-web` | Chromium WebGL2 and WebGPU scenes through freestanding wasm and JS bridges |
+| `zig build check-scenes-windows` | Windows D3D11, D3D12 and Vulkan scene build |
 | `zig build check-d3d11` | builds the D3D11 smoke executable (run it under Windows or Wine/DXVK) |
 | `zig build check-metal` | type-checks the Metal backend for aarch64 macOS and iOS |
 | `python3 tools/port_coverage.py` | public entry-point coverage |
@@ -107,6 +122,14 @@ Observed in this environment (Linux, Mesa 26.2.4, AMD Radeon RENOIR):
   Apple's headers by hand. It has not run on Apple hardware; the riskiest parts are
   `objc_msgSend` struct arguments, the completion-handler block literal and
   object lifetimes.
+
+## Browser implementation
+
+`src/gpu/web.zig` provides wasm import resolvers and target-derived WebGPU ABI
+metadata. `tools/web/` supplies the JavaScript adapters and a freestanding scene
+entry point. GL uses the existing GLES path with wasm-specific capability checks;
+WebGPU uses the native backend with non-blocking owned readback tickets. The C
+header is still compiled only into differential test tooling.
 
 ## Not yet verified
 

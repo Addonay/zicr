@@ -1,6 +1,7 @@
 //! Native GL resource operations. References the GL backend in sokol_gfx.h.
 //! Invokes the active context driver through native Zig function pointers.
 const std = @import("std");
+const is_web = builtin.cpu.arch.isWasm();
 const builtin = @import("builtin");
 const t = @import("../../types.zig");
 const e = @import("../../enums.zig");
@@ -45,6 +46,7 @@ pub const Backend = struct {
     immutable_storage: bool = false,
     vao: u32 = 0,
     framebuffer: u32 = 0,
+    readback_framebuffer: u32 = 0,
     apple_unpack_warned: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, kind: e.Backend, loader: driver_api.GetProcAddress, user_data: ?*anyopaque, logger: t.Logger) !Backend {
@@ -69,7 +71,7 @@ pub const Backend = struct {
         if (!gles and version >= 430) try driver.require(.{"textureView"});
         if (gles) try driver.require(.{ "texStorage2D", "texStorage3D", "invalidateFramebuffer" });
         if (!gles and version >= 420) try driver.require(.{ "texStorage2D", "texStorage3D", "texStorage2DMultisample", "texStorage3DMultisample" });
-        var extensions: caps.Extensions = .{ .etc2 = gles and builtin.os.tag != .emscripten };
+        var extensions: caps.Extensions = .{ .etc2 = gles and !is_web };
         var extension_count: i32 = 0;
         driver.getIntegerv.?(c.num_extensions, @ptrCast(&extension_count));
         for (0..@intCast(@max(0, extension_count))) |i| {
@@ -88,14 +90,14 @@ pub const Backend = struct {
                 if (std.mem.indexOf(u8, extension, pattern[0]) != null) @field(extensions, pattern[1]) = true;
             }
         }
-        if (builtin.os.tag == .emscripten and extensions.colorbuffer_float) extensions.colorbuffer_half_float = true;
+        if (is_web and extensions.colorbuffer_float) extensions.colorbuffer_half_float = true;
         const features: t.Features = .{
             .image_clamp_to_border = !gles,
             .mrt_independent_write_mask = !gles or version >= 320,
             .compute = compute,
             .msaa_texture_bindings = !gles,
             .gl_texture_views = version >= 430,
-            .separate_buffer_types = gles and builtin.os.tag == .emscripten,
+            .separate_buffer_types = gles and is_web,
             .draw_base_vertex = version >= 320,
             .draw_base_instance = !gles and version >= 420,
             .dual_source_blending = !gles and version >= 330,
@@ -142,6 +144,7 @@ pub const Backend = struct {
     }
 
     pub fn deinit(self: *Backend) void {
+        if (self.readback_framebuffer != 0) self.cache.driver.deleteFramebuffers.?(1, @ptrCast(&self.readback_framebuffer));
         if (self.framebuffer != 0) self.cache.driver.deleteFramebuffers.?(1, @ptrCast(&self.framebuffer));
         if (self.vao != 0) self.cache.driver.deleteVertexArrays.?(1, @ptrCast(&self.vao));
         self.framebuffer = 0;
@@ -533,7 +536,20 @@ pub const Backend = struct {
         self.cache.restoreTexture(0, saved);
         driver.bindBuffer.?(c.pixel_unpack_buffer, 0);
     }
+    /// Framebuffer/readback mip levels are absolute, independent of the last
+    /// emulated sampler view. Restore the backing texture's complete mip range.
+    pub fn resetTextureMipRange(self: *Backend, image: *const r.Image, desc: t.ImageDesc, active_slot: i32) void {
+        if (self.cache.features.gl_texture_views or desc.sample_count != 1 or desc.num_mipmaps <= 1) return;
+        const saved = self.cache.textures[0];
+        self.cache.bindTexture(0, image.target, image.ids[@intCast(active_slot)], 0);
+        self.cache.activeTexture(c.texture0);
+        self.cache.driver.texParameteri.?(image.target, c.texture_base_level, 0);
+        self.cache.driver.texParameteri.?(image.target, c.texture_max_level, desc.num_mipmaps - 1);
+        self.cache.bindTexture(0, saved.target, saved.texture, saved.sampler);
+    }
+
     pub fn attachImage(self: *Backend, image: *const r.Image, desc: t.ImageDesc, mip_level: i32, slice: i32, attachment: u32) void {
+        self.resetTextureMipRange(image, desc, 0);
         const driver = self.cache.driver;
         switch (desc.type) {
             .@"2d" => driver.framebufferTexture2D.?(c.framebuffer, attachment, image.target, image.ids[0], mip_level),
@@ -556,6 +572,17 @@ pub const Backend = struct {
     }
     pub fn createView(self: *Backend, view: *r.View, descriptor: t.ViewDesc, image: ?*const r.Image, image_desc: t.ImageDesc) bool {
         const driver = self.cache.driver;
+        if (descriptor.texture.image.id != 0 and !self.cache.features.gl_texture_views) {
+            const full_slices = switch (image_desc.type) {
+                .array => image_desc.num_slices,
+                .cube => 6,
+                else => 1,
+            };
+            if (descriptor.texture.slices.base != 0 or descriptor.texture.slices.count != full_slices) {
+                self.message(1, .gl_texture_view_slice_range_unsupported, null);
+                return false;
+            }
+        }
         if (descriptor.texture.image.id != 0 and self.cache.features.gl_texture_views) {
             const source = image.?;
             const desc = descriptor.texture;
@@ -597,7 +624,7 @@ pub const Backend = struct {
         driver.bindBuffer.?(c.copy_read_buffer, buffer.ids[@intCast(active_slot)]);
         defer driver.bindBuffer.?(c.copy_read_buffer, 0);
         // GLES has no glGetBufferSubData, even if the loader resolves the symbol
-        if (!self.gles) if (driver.getBufferSubData) |getBufferSubData| {
+        if (!self.gles or is_web) if (driver.getBufferSubData) |getBufferSubData| {
             getBufferSubData(c.copy_read_buffer, @intCast(offset), @intCast(out.len), out.ptr);
             return true;
         };
@@ -610,12 +637,20 @@ pub const Backend = struct {
     /// Readback (zicr extension): reads an image region in storage row order
     /// through the backend's framebuffer object, one slice at a time.
     pub fn readImage(self: *Backend, image: *r.Image, desc: t.ImageDesc, active_slot: i32, region: *const core.ReadRegion, out: []u8) bool {
+        // WebGL cannot promise exact packed-format readback through canonical
+        // RGBA8/FLOAT conversion. Report unsupported instead of losing bits.
+        if (is_web and (desc.pixel_format == .rgb10a2 or desc.pixel_format == .rg11b10f)) return false;
+        self.resetTextureMipRange(image, desc, active_slot);
         const driver = self.cache.driver;
         const read_pixels = driver.readPixels orelse return false;
         if (self.cache.features.compute) driver.memoryBarrier.?(c.all_barrier_bits);
         const saved: u32 = @bitCast(self.integer(c.framebuffer_binding));
         defer driver.bindFramebuffer.?(c.framebuffer, saved);
-        driver.bindFramebuffer.?(c.framebuffer, self.framebuffer);
+        // Keep readback attachments separate from an MRT pass: WebGL forbids
+        // attaching the same image to two colour slots of one framebuffer.
+        if (self.readback_framebuffer == 0) driver.genFramebuffers.?(1, @ptrCast(&self.readback_framebuffer));
+        if (self.readback_framebuffer == 0) return false;
+        driver.bindFramebuffer.?(c.framebuffer, self.readback_framebuffer);
         const texture = image.ids[@intCast(active_slot)];
         const mip: i32 = @intCast(region.mip_level);
         const bytes_per_pixel: usize = @intCast(formats.pixelSize(desc.pixel_format));

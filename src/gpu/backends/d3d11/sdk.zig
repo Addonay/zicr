@@ -3,9 +3,9 @@
 //! No Sokol functions or external function symbols are declared.
 const std = @import("std");
 const builtin = @import("builtin");
-pub const call_conv: std.builtin.CallingConvention = if (builtin.cpu.arch == .x86) .{ .x86_stdcall = .{} } else .c;
-pub const Object = opaque {};
-pub const Guid = extern struct { data1: u32, data2: u16, data3: u16, data4: [8]u8 };
+pub const call_conv = @import("../dxgi/com.zig").call_conv;
+pub const Object = @import("../dxgi/com.zig").Object;
+pub const Guid = @import("../dxgi/com.zig").Guid;
 pub const Rect = extern struct { left: i32 = 0, top: i32 = 0, right: i32 = 0, bottom: i32 = 0 };
 
 pub const BlendDesc = extern struct {
@@ -446,13 +446,9 @@ pub fn createSamplerState(object: *Object, p_sampler_desc: ?[*]const SamplerDesc
     return invoke(23, *const fn (*Object, ?[*]const SamplerDesc, *?*Object) callconv(call_conv) i32, object, .{ p_sampler_desc, pp_sampler_state });
 }
 
-pub fn getBufferPointer(object: *Object) ?*anyopaque {
-    return invoke(3, *const fn (*Object) callconv(call_conv) ?*anyopaque, object, .{});
-}
+pub const getBufferPointer = @import("../dxgi/com.zig").getBufferPointer;
 
-pub fn getBufferSize(object: *Object) usize {
-    return invoke(4, *const fn (*Object) callconv(call_conv) usize, object, .{});
-}
+pub const getBufferSize = @import("../dxgi/com.zig").getBufferSize;
 
 pub fn createVertexShader(object: *Object, p_shader_bytecode: ?*const anyopaque, bytecode_length: usize, p_class_linkage: ?*Object, pp_vertex_shader: *?*Object) i32 {
     return invoke(12, *const fn (*Object, ?*const anyopaque, usize, ?*Object, *?*Object) callconv(call_conv) i32, object, .{ p_shader_bytecode, bytecode_length, p_class_linkage, pp_vertex_shader });
@@ -558,20 +554,10 @@ pub fn getFeatureLevel(object: *Object) u32 {
     return invoke(37, *const fn (*Object) callconv(call_conv) u32, object, .{});
 }
 
-pub fn invoke(comptime index: usize, comptime Function: type, object: *Object, arguments: anytype) @typeInfo(@typeInfo(Function).pointer.child).@"fn".return_type.? {
-    const header: *const [*]const ?*const anyopaque = @ptrCast(@alignCast(object));
-    const method: Function = @ptrCast(@alignCast(header.*[index].?));
-    return @call(.auto, method, .{object} ++ arguments);
-}
-pub fn addRef(object: *Object) u32 {
-    return invoke(1, *const fn (*Object) callconv(call_conv) u32, object, .{});
-}
-pub fn release(object: ?*Object) void {
-    if (object) |value| _ = invoke(2, *const fn (*Object) callconv(call_conv) u32, value, .{});
-}
-pub fn setPrivateData(object: *Object, guid: *const Guid, size: u32, data: ?*const anyopaque) i32 {
-    return invoke(5, *const fn (*Object, *const Guid, u32, ?*const anyopaque) callconv(call_conv) i32, object, .{ guid, size, data });
-}
+pub const invoke = @import("../dxgi/com.zig").invoke;
+pub const addRef = @import("../dxgi/com.zig").addRef;
+pub const release = @import("../dxgi/com.zig").release;
+pub const setPrivateData = @import("../dxgi/com.zig").setPrivateData;
 
 pub const indices = struct {
     pub const checkFormatSupport: usize = 29;
@@ -676,10 +662,27 @@ pub const UnorderedAccessViewDescData = extern union {
     texture_3d: Tex3dUav,
 };
 
-pub const CompileFn = *const fn (?*const anyopaque, usize, ?[*:0]const u8, ?*const anyopaque, ?*anyopaque, ?[*:0]const u8, ?[*:0]const u8, u32, u32, *?*Object, *?*Object) callconv(call_conv) i32;
+pub const CompileFn = @import("../dxgi/com.zig").CompileFn;
 
 pub fn fromOpaque(pointer: *const anyopaque) *Object {
     return @ptrCast(@constCast(pointer));
 }
 
 pub const SampleDesc = extern struct { count: u32 = 0, quality: u32 = 0 };
+
+pub const QueryDesc = extern struct { query: u32 = 0, misc_flags: u32 = 0 };
+pub fn createQuery(object: *Object, desc: *const QueryDesc, out: *?*Object) i32 {
+    return invoke(24, *const fn (*Object, *const QueryDesc, *?*Object) callconv(call_conv) i32, object, .{ desc, out });
+}
+pub fn endQuery(object: *Object, query: *Object) void {
+    invoke(28, *const fn (*Object, *Object) callconv(call_conv) void, object, .{query});
+}
+pub fn queryData(object: *Object, query: *Object, data: *u32, flags: u32) i32 {
+    return invoke(29, *const fn (*Object, *Object, *u32, u32, u32) callconv(call_conv) i32, object, .{ query, data, 4, flags });
+}
+pub fn flush(object: *Object) void {
+    invoke(111, *const fn (*Object) callconv(call_conv) void, object, .{});
+}
+pub fn getDeviceRemovedReason(object: *Object) i32 {
+    return invoke(39, *const fn (*Object) callconv(call_conv) i32, object, .{});
+}

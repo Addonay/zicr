@@ -1,0 +1,1081 @@
+{
+  "schema": 1,
+  "timestamp_utc": "2026-10-19T02:14:13.700092+00:00",
+  "platform": "Linux-7.2.8-200.fc44.x86_64-x86_64-with-glibc2.43",
+  "machine": "x86_64",
+  "binary_sha256": "2b5cd0928ced8a834571a7258e209738a600624fc401c19e9a7d7dfaa40408aa",
+  "method": "rotating process order; warmups excluded; checked pixels and bytes outside timing; GPU drained between samples",
+  "c_readback": "native API equivalent because upstream sokol has no readback API",
+  "runs": [
+    {
+      "round": 0,
+      "command": [
+        "/home/addo/dev/stupid/zicr/zig-out/bin/zicr-bench-wgpu",
+        "--mode",
+        "c",
+        "--draws",
+        "10000",
+        "--resources",
+        "1000",
+        "--bytes",
+        "4194304",
+        "--samples",
+        "9",
+        "--warmup",
+        "3"
+      ],
+      "result": {
+        "schema": 1,
+        "backend": "wgpu",
+        "mode": "c",
+        "adapter": "Mesa 26.2.4 (native WebGPU, backend 6, DevicePoll)",
+        "zig": "0.17.0",
+        "optimize": "fast",
+        "c_compiler": "Clang 22.1.8",
+        "cpu": "znver3",
+        "validation": false,
+        "statistics": false,
+        "allocator": "std.process.Init.gpa",
+        "warmup": 3,
+        "results": [
+          {
+            "workload": "draws",
+            "operations": 10000,
+            "bytes": 0,
+            "samples_ns": [
+              11350301,
+              11035160,
+              12055582,
+              11333109,
+              11499050,
+              10726973,
+              10940153,
+              10791755,
+              10838452
+            ]
+          },
+          {
+            "workload": "churn",
+            "operations": 1000,
+            "bytes": 0,
+            "samples_ns": [
+              2091327,
+              2107638,
+              2102238,
+              2102358,
+              2090737,
+              2178852,
+              2123908,
+              2227292,
+              2160738
+            ]
+          },
+          {
+            "workload": "upload",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              333835,
+              294060,
+              350887,
+              296395,
+              284052,
+              269866,
+              266259,
+              270957,
+              279363
+            ]
+          },
+          {
+            "workload": "readback",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              1296118,
+              1198234,
+              1292572,
+              2308644,
+              1363955,
+              1284937,
+              1237598,
+              1239522,
+              1239732
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "round": 0,
+      "command": [
+        "/home/addo/dev/stupid/zicr/zig-out/bin/zicr-bench-wgpu",
+        "--mode",
+        "raw",
+        "--draws",
+        "10000",
+        "--resources",
+        "1000",
+        "--bytes",
+        "4194304",
+        "--samples",
+        "9",
+        "--warmup",
+        "3"
+      ],
+      "result": {
+        "schema": 1,
+        "backend": "wgpu",
+        "mode": "raw",
+        "adapter": "Mesa 26.2.4 (native WebGPU, backend 6, DevicePoll)",
+        "zig": "0.17.0",
+        "optimize": "fast",
+        "c_compiler": "Clang 22.1.8",
+        "cpu": "znver3",
+        "validation": false,
+        "statistics": false,
+        "allocator": "std.process.Init.gpa",
+        "warmup": 3,
+        "results": [
+          {
+            "workload": "draws",
+            "operations": 10000,
+            "bytes": 0,
+            "samples_ns": [
+              9746306,
+              9925983,
+              9859047,
+              9591216,
+              9677918,
+              9521165,
+              9524922,
+              9476721,
+              9284662
+            ]
+          },
+          {
+            "workload": "churn",
+            "operations": 1000,
+            "bytes": 0,
+            "samples_ns": [
+              1737645,
+              1706868,
+              3712303,
+              1670920,
+              1716656,
+              1848072,
+              1782950,
+              1799692,
+              1734058
+            ]
+          },
+          {
+            "workload": "upload",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              280856,
+              261540,
+              272300,
+              309239,
+              406211,
+              340719,
+              309390,
+              379631,
+              325119
+            ]
+          },
+          {
+            "workload": "readback",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              1724019,
+              1381147,
+              1241625,
+              1265290,
+              1245293,
+              1235735,
+              1347685,
+              1455556,
+              1354437
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "round": 0,
+      "command": [
+        "/home/addo/dev/stupid/zicr/zig-out/bin/zicr-bench-wgpu",
+        "--mode",
+        "public",
+        "--draws",
+        "10000",
+        "--resources",
+        "1000",
+        "--bytes",
+        "4194304",
+        "--samples",
+        "9",
+        "--warmup",
+        "3"
+      ],
+      "result": {
+        "schema": 1,
+        "backend": "wgpu",
+        "mode": "public",
+        "adapter": "Mesa 26.2.4 (native WebGPU, backend 6, DevicePoll)",
+        "zig": "0.17.0",
+        "optimize": "fast",
+        "c_compiler": "Clang 22.1.8",
+        "cpu": "znver3",
+        "validation": false,
+        "statistics": false,
+        "allocator": "std.process.Init.gpa",
+        "warmup": 3,
+        "results": [
+          {
+            "workload": "draws",
+            "operations": 10000,
+            "bytes": 0,
+            "samples_ns": [
+              10341732,
+              9830825,
+              9710169,
+              9616474,
+              9573332,
+              9745925,
+              9725438,
+              9783336,
+              9678188
+            ]
+          },
+          {
+            "workload": "churn",
+            "operations": 1000,
+            "bytes": 0,
+            "samples_ns": [
+              1865354,
+              1754145,
+              1727196,
+              1751029,
+              1687231,
+              1706105,
+              1723729,
+              1724841,
+              1763073
+            ]
+          },
+          {
+            "workload": "upload",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              313768,
+              396633,
+              377868,
+              336070,
+              292839,
+              270336,
+              258164,
+              281067,
+              244367
+            ]
+          },
+          {
+            "workload": "readback",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              1209726,
+              1214675,
+              1197773,
+              1218412,
+              1252606,
+              1467268,
+              1510710,
+              1507574,
+              1670650
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "round": 1,
+      "command": [
+        "/home/addo/dev/stupid/zicr/zig-out/bin/zicr-bench-wgpu",
+        "--mode",
+        "raw",
+        "--draws",
+        "10000",
+        "--resources",
+        "1000",
+        "--bytes",
+        "4194304",
+        "--samples",
+        "9",
+        "--warmup",
+        "3"
+      ],
+      "result": {
+        "schema": 1,
+        "backend": "wgpu",
+        "mode": "raw",
+        "adapter": "Mesa 26.2.4 (native WebGPU, backend 6, DevicePoll)",
+        "zig": "0.17.0",
+        "optimize": "fast",
+        "c_compiler": "Clang 22.1.8",
+        "cpu": "znver3",
+        "validation": false,
+        "statistics": false,
+        "allocator": "std.process.Init.gpa",
+        "warmup": 3,
+        "results": [
+          {
+            "workload": "draws",
+            "operations": 10000,
+            "bytes": 0,
+            "samples_ns": [
+              11462531,
+              10029467,
+              10220164,
+              10082806,
+              9891228,
+              9393055,
+              9728713,
+              9345415,
+              9326049
+            ]
+          },
+          {
+            "workload": "churn",
+            "operations": 1000,
+            "bytes": 0,
+            "samples_ns": [
+              1708701,
+              1681299,
+              1737094,
+              1682792,
+              1698832,
+              1671120,
+              1717337,
+              1705755,
+              1706226
+            ]
+          },
+          {
+            "workload": "upload",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              423102,
+              325891,
+              316292,
+              289983,
+              269425,
+              292778,
+              279163,
+              279714,
+              273512
+            ]
+          },
+          {
+            "workload": "readback",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              1390785,
+              1438825,
+              1360579,
+              1407827,
+              1886383,
+              1469643,
+              1302460,
+              1245073,
+              1211610
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "round": 1,
+      "command": [
+        "/home/addo/dev/stupid/zicr/zig-out/bin/zicr-bench-wgpu",
+        "--mode",
+        "public",
+        "--draws",
+        "10000",
+        "--resources",
+        "1000",
+        "--bytes",
+        "4194304",
+        "--samples",
+        "9",
+        "--warmup",
+        "3"
+      ],
+      "result": {
+        "schema": 1,
+        "backend": "wgpu",
+        "mode": "public",
+        "adapter": "Mesa 26.2.4 (native WebGPU, backend 6, DevicePoll)",
+        "zig": "0.17.0",
+        "optimize": "fast",
+        "c_compiler": "Clang 22.1.8",
+        "cpu": "znver3",
+        "validation": false,
+        "statistics": false,
+        "allocator": "std.process.Init.gpa",
+        "warmup": 3,
+        "results": [
+          {
+            "workload": "draws",
+            "operations": 10000,
+            "bytes": 0,
+            "samples_ns": [
+              10538119,
+              10908954,
+              10095811,
+              10023807,
+              10227769,
+              9648283,
+              9547194,
+              9680322,
+              9625169
+            ]
+          },
+          {
+            "workload": "churn",
+            "operations": 1000,
+            "bytes": 0,
+            "samples_ns": [
+              1722938,
+              1809710,
+              3817160,
+              1725712,
+              1703972,
+              1675509,
+              1719821,
+              1764315,
+              1723559
+            ]
+          },
+          {
+            "workload": "upload",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              345127,
+              319488,
+              284734,
+              414266,
+              516127,
+              409097,
+              331341,
+              314650,
+              303408
+            ]
+          },
+          {
+            "workload": "readback",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              1770085,
+              1374796,
+              1267344,
+              1300245,
+              1300717,
+              1248349,
+              1263065,
+              1255412,
+              1406094
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "round": 1,
+      "command": [
+        "/home/addo/dev/stupid/zicr/zig-out/bin/zicr-bench-wgpu",
+        "--mode",
+        "c",
+        "--draws",
+        "10000",
+        "--resources",
+        "1000",
+        "--bytes",
+        "4194304",
+        "--samples",
+        "9",
+        "--warmup",
+        "3"
+      ],
+      "result": {
+        "schema": 1,
+        "backend": "wgpu",
+        "mode": "c",
+        "adapter": "Mesa 26.2.4 (native WebGPU, backend 6, DevicePoll)",
+        "zig": "0.17.0",
+        "optimize": "fast",
+        "c_compiler": "Clang 22.1.8",
+        "cpu": "znver3",
+        "validation": false,
+        "statistics": false,
+        "allocator": "std.process.Init.gpa",
+        "warmup": 3,
+        "results": [
+          {
+            "workload": "draws",
+            "operations": 10000,
+            "bytes": 0,
+            "samples_ns": [
+              11420923,
+              11355060,
+              11036433,
+              11155236,
+              10926386,
+              10441649,
+              10530716,
+              10609794,
+              10682871
+            ]
+          },
+          {
+            "workload": "churn",
+            "operations": 1000,
+            "bytes": 0,
+            "samples_ns": [
+              1674486,
+              3984894,
+              1710163,
+              1645222,
+              1648508,
+              1716045,
+              1665019,
+              1667884,
+              1751671
+            ]
+          },
+          {
+            "workload": "upload",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              364472,
+              326492,
+              313597,
+              499285,
+              347801,
+              329747,
+              323837,
+              309680,
+              345107
+            ]
+          },
+          {
+            "workload": "readback",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              1599365,
+              1208814,
+              1154643,
+              1190039,
+              1201280,
+              1203694,
+              1126370,
+              1371619,
+              1628902
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "round": 2,
+      "command": [
+        "/home/addo/dev/stupid/zicr/zig-out/bin/zicr-bench-wgpu",
+        "--mode",
+        "public",
+        "--draws",
+        "10000",
+        "--resources",
+        "1000",
+        "--bytes",
+        "4194304",
+        "--samples",
+        "9",
+        "--warmup",
+        "3"
+      ],
+      "result": {
+        "schema": 1,
+        "backend": "wgpu",
+        "mode": "public",
+        "adapter": "Mesa 26.2.4 (native WebGPU, backend 6, DevicePoll)",
+        "zig": "0.17.0",
+        "optimize": "fast",
+        "c_compiler": "Clang 22.1.8",
+        "cpu": "znver3",
+        "validation": false,
+        "statistics": false,
+        "allocator": "std.process.Init.gpa",
+        "warmup": 3,
+        "results": [
+          {
+            "workload": "draws",
+            "operations": 10000,
+            "bytes": 0,
+            "samples_ns": [
+              10103826,
+              9983610,
+              9949857,
+              9724115,
+              9565468,
+              9486740,
+              9438349,
+              9687296,
+              9287717
+            ]
+          },
+          {
+            "workload": "churn",
+            "operations": 1000,
+            "bytes": 0,
+            "samples_ns": [
+              1785174,
+              1857219,
+              1830699,
+              1808768,
+              1839817,
+              4256864,
+              1784573,
+              1782288,
+              1809800
+            ]
+          },
+          {
+            "workload": "upload",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              324508,
+              274885,
+              258233,
+              471954,
+              326632,
+              319860,
+              305953,
+              566311,
+              330138
+            ]
+          },
+          {
+            "workload": "readback",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              1244801,
+              1332566,
+              1337626,
+              1254740,
+              1247587,
+              1186693,
+              1227970,
+              1224984,
+              1276441
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "round": 2,
+      "command": [
+        "/home/addo/dev/stupid/zicr/zig-out/bin/zicr-bench-wgpu",
+        "--mode",
+        "c",
+        "--draws",
+        "10000",
+        "--resources",
+        "1000",
+        "--bytes",
+        "4194304",
+        "--samples",
+        "9",
+        "--warmup",
+        "3"
+      ],
+      "result": {
+        "schema": 1,
+        "backend": "wgpu",
+        "mode": "c",
+        "adapter": "Mesa 26.2.4 (native WebGPU, backend 6, DevicePoll)",
+        "zig": "0.17.0",
+        "optimize": "fast",
+        "c_compiler": "Clang 22.1.8",
+        "cpu": "znver3",
+        "validation": false,
+        "statistics": false,
+        "allocator": "std.process.Init.gpa",
+        "warmup": 3,
+        "results": [
+          {
+            "workload": "draws",
+            "operations": 10000,
+            "bytes": 0,
+            "samples_ns": [
+              11308894,
+              11459586,
+              10973224,
+              10966131,
+              11209237,
+              10672682,
+              10983193,
+              10469832,
+              10507803
+            ]
+          },
+          {
+            "workload": "churn",
+            "operations": 1000,
+            "bytes": 0,
+            "samples_ns": [
+              1708000,
+              1717437,
+              1725332,
+              1711185,
+              1671471,
+              1706026,
+              2111596,
+              2349952,
+              1690757
+            ]
+          },
+          {
+            "workload": "upload",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              294983,
+              280385,
+              388999,
+              300372,
+              288440,
+              260969,
+              286937,
+              246442,
+              242615
+            ]
+          },
+          {
+            "workload": "readback",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              1355950,
+              1337796,
+              1357783,
+              1334529,
+              1316737,
+              1292000,
+              1519205,
+              1711105,
+              1334500
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "round": 2,
+      "command": [
+        "/home/addo/dev/stupid/zicr/zig-out/bin/zicr-bench-wgpu",
+        "--mode",
+        "raw",
+        "--draws",
+        "10000",
+        "--resources",
+        "1000",
+        "--bytes",
+        "4194304",
+        "--samples",
+        "9",
+        "--warmup",
+        "3"
+      ],
+      "result": {
+        "schema": 1,
+        "backend": "wgpu",
+        "mode": "raw",
+        "adapter": "Mesa 26.2.4 (native WebGPU, backend 6, DevicePoll)",
+        "zig": "0.17.0",
+        "optimize": "fast",
+        "c_compiler": "Clang 22.1.8",
+        "cpu": "znver3",
+        "validation": false,
+        "statistics": false,
+        "allocator": "std.process.Init.gpa",
+        "warmup": 3,
+        "results": [
+          {
+            "workload": "draws",
+            "operations": 10000,
+            "bytes": 0,
+            "samples_ns": [
+              10319320,
+              10240182,
+              9760453,
+              9612024,
+              9920893,
+              9599121,
+              10190278,
+              9865099,
+              9550389
+            ]
+          },
+          {
+            "workload": "churn",
+            "operations": 1000,
+            "bytes": 0,
+            "samples_ns": [
+              1690867,
+              1693192,
+              1687231,
+              1680768,
+              4328328,
+              1667163,
+              1659268,
+              1661171,
+              1659127
+            ]
+          },
+          {
+            "workload": "upload",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              275667,
+              298079,
+              259175,
+              282870,
+              463639,
+              338494,
+              526125,
+              343363,
+              305032
+            ]
+          },
+          {
+            "workload": "readback",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              1309072,
+              1451398,
+              1373372,
+              1264138,
+              1267945,
+              1287692,
+              1298473,
+              1406665,
+              1328418
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "summary": [
+    {
+      "mode": "c",
+      "workload": "draws",
+      "samples": 27,
+      "median_ns": 10973224,
+      "min_ns": 10441649,
+      "max_ns": 12055582,
+      "mean_ns": 11010377.222222222,
+      "stdev_ns": 384549.2976275887,
+      "coefficient_of_variation": 0.03492607835919133,
+      "cpu_ns_per_operation": 1097.3224,
+      "operations": 10000,
+      "bytes": 0,
+      "time_relative_to_c": 1.0
+    },
+    {
+      "mode": "c",
+      "workload": "churn",
+      "samples": 27,
+      "median_ns": 1725332,
+      "min_ns": 1645222,
+      "max_ns": 3984894,
+      "mean_ns": 1964471.7037037036,
+      "stdev_ns": 465448.8332840939,
+      "coefficient_of_variation": 0.236933335515377,
+      "cpu_ns_per_operation": 1725.332,
+      "operations": 1000,
+      "bytes": 0,
+      "time_relative_to_c": 1.0
+    },
+    {
+      "mode": "c",
+      "workload": "upload",
+      "samples": 27,
+      "median_ns": 296395,
+      "min_ns": 242615,
+      "max_ns": 499285,
+      "mean_ns": 310956.81481481483,
+      "stdev_ns": 52277.25647268171,
+      "coefficient_of_variation": 0.16811741689538,
+      "cpu_ns_per_operation": 296395.0,
+      "operations": 1,
+      "bytes": 4194304,
+      "GiB_per_second": 13.179203427858095,
+      "time_relative_to_c": 1.0
+    },
+    {
+      "mode": "c",
+      "workload": "readback",
+      "samples": 27,
+      "median_ns": 1296118,
+      "min_ns": 1126370,
+      "max_ns": 2308644,
+      "mean_ns": 1359468.2592592593,
+      "stdev_ns": 237706.67833578045,
+      "coefficient_of_variation": 0.1748526872303006,
+      "cpu_ns_per_operation": 1296118.0,
+      "operations": 1,
+      "bytes": 4194304,
+      "GiB_per_second": 3.013807384821444,
+      "time_relative_to_c": 1.0
+    },
+    {
+      "mode": "raw",
+      "workload": "draws",
+      "samples": 27,
+      "median_ns": 9746306,
+      "min_ns": 9284662,
+      "max_ns": 11462531,
+      "mean_ns": 9820189.888888888,
+      "stdev_ns": 440754.46399147256,
+      "coefficient_of_variation": 0.044882478748213085,
+      "cpu_ns_per_operation": 974.6306,
+      "operations": 10000,
+      "bytes": 0,
+      "time_relative_to_c": 0.8881898337261683
+    },
+    {
+      "mode": "raw",
+      "workload": "churn",
+      "samples": 27,
+      "median_ns": 1705755,
+      "min_ns": 1659127,
+      "max_ns": 4328328,
+      "mean_ns": 1879460.5555555555,
+      "stdev_ns": 624508.5006559056,
+      "coefficient_of_variation": 0.33228071683116817,
+      "cpu_ns_per_operation": 1705.755,
+      "operations": 1000,
+      "bytes": 0,
+      "time_relative_to_c": 0.988653198340957
+    },
+    {
+      "mode": "raw",
+      "workload": "upload",
+      "samples": 27,
+      "median_ns": 305032,
+      "min_ns": 259175,
+      "max_ns": 526125,
+      "mean_ns": 323233.6666666667,
+      "stdev_ns": 65251.22776445843,
+      "coefficient_of_variation": 0.20187014687349533,
+      "cpu_ns_per_operation": 305032.0,
+      "operations": 1,
+      "bytes": 4194304,
+      "GiB_per_second": 12.806033465341342,
+      "time_relative_to_c": 1.029140167681641
+    },
+    {
+      "mode": "raw",
+      "workload": "readback",
+      "samples": 27,
+      "median_ns": 1347685,
+      "min_ns": 1211610,
+      "max_ns": 1886383,
+      "mean_ns": 1368560.9259259258,
+      "stdev_ns": 148056.74817003988,
+      "coefficient_of_variation": 0.10818425790570432,
+      "cpu_ns_per_operation": 1347685.0,
+      "operations": 1,
+      "bytes": 4194304,
+      "GiB_per_second": 2.8984888902080232,
+      "time_relative_to_c": 1.0397857293857504
+    },
+    {
+      "mode": "public",
+      "workload": "draws",
+      "samples": 27,
+      "median_ns": 9724115,
+      "min_ns": 9287717,
+      "max_ns": 10908954,
+      "mean_ns": 9834363.888888888,
+      "stdev_ns": 357317.3935554445,
+      "coefficient_of_variation": 0.03633355421789412,
+      "cpu_ns_per_operation": 972.4115,
+      "operations": 10000,
+      "bytes": 0,
+      "time_relative_to_c": 0.8861675474773868
+    },
+    {
+      "mode": "public",
+      "workload": "churn",
+      "samples": 27,
+      "median_ns": 1763073,
+      "min_ns": 1675509,
+      "max_ns": 4256864,
+      "mean_ns": 1930392.6296296297,
+      "stdev_ns": 612405.4886513666,
+      "coefficient_of_variation": 0.31724400479547227,
+      "cpu_ns_per_operation": 1763.073,
+      "operations": 1000,
+      "bytes": 0,
+      "time_relative_to_c": 1.0218746305058968
+    },
+    {
+      "mode": "public",
+      "workload": "upload",
+      "samples": 27,
+      "median_ns": 319860,
+      "min_ns": 244367,
+      "max_ns": 566311,
+      "mean_ns": 340289.77777777775,
+      "stdev_ns": 78505.0987483436,
+      "coefficient_of_variation": 0.2307007258960639,
+      "cpu_ns_per_operation": 319860.0,
+      "operations": 1,
+      "bytes": 4194304,
+      "GiB_per_second": 12.212374163696618,
+      "time_relative_to_c": 1.0791680021592807
+    },
+    {
+      "mode": "public",
+      "workload": "readback",
+      "samples": 27,
+      "median_ns": 1263065,
+      "min_ns": 1186693,
+      "max_ns": 1770085,
+      "mean_ns": 1324774.4074074074,
+      "stdev_ns": 145509.9973845993,
+      "coefficient_of_variation": 0.10983756673663658,
+      "cpu_ns_per_operation": 1263065.0,
+      "operations": 1,
+      "bytes": 4194304,
+      "GiB_per_second": 3.0926753571668915,
+      "time_relative_to_c": 0.9744984638744312
+    }
+  ]
+}

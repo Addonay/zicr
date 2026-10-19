@@ -1,6 +1,6 @@
 //! Tests of the public zicr.gpu API on the dummy backend.
 const std = @import("std");
-const gpu = @import("gpu.zig");
+const gpu = @import("root.zig");
 
 const Diagnostics = struct {
     var items: [64]gpu.LogItem = undefined;
@@ -27,11 +27,13 @@ fn testDevice(options: gpu.Options) !gpu.Device {
     return gpu.Device.init(std.testing.allocator, opts);
 }
 
-test "a device is exclusive and reports its backend" {
+test "independent devices report their backend" {
     var dev = try testDevice(.{ .backend = .dummy });
     defer dev.deinit();
     try std.testing.expectEqual(gpu.Backend.dummy, dev.backend());
-    try std.testing.expectError(error.DeviceAlreadyExists, gpu.Device.init(std.testing.allocator, .{ .backend = .dummy }));
+    var second = try gpu.Device.init(std.testing.allocator, .{ .backend = .dummy });
+    defer second.deinit();
+    try std.testing.expectEqual(gpu.Backend.dummy, second.backend());
     try std.testing.expect(dev.limits().max_color_attachments > 0);
     try std.testing.expectEqual(@as(u32, 4), dev.formatInfo(.rgba8).bytes_per_pixel);
 }
@@ -212,4 +214,104 @@ test "readback validates the request and fills the destination" {
     var small: [4]u8 = undefined;
     try std.testing.expectError(error.ReadFailed, dev.readImage(rt, .{}, &small, .{}));
     try std.testing.expect(Diagnostics.contains(.validate_readimage_dst_size));
+}
+
+test "owned readback tickets retain results after source destruction and validate pitches" {
+    var dev = try testDevice(.{ .backend = .dummy });
+    defer dev.deinit();
+    const source = try dev.createBuffer(.{ .usage = .{ .copy_src = true }, .data = &@as([16]u8, @splat(1)) });
+    var ticket = try dev.requestReadBuffer(source, 3, 7);
+    defer ticket.deinit();
+    dev.destroy(source);
+    try std.testing.expectEqualSlices(u8, &@as([7]u8, @splat(0)), (try ticket.poll()).?);
+    try std.testing.expectEqualSlices(u8, &@as([7]u8, @splat(0)), (try ticket.poll()).?);
+    try std.testing.expectError(error.ReadFailed, dev.requestReadBuffer(source, 0, 4));
+
+    const image = try dev.createImage(.{ .width = 4, .height = 2, .usage = .{ .color_attachment = true, .copy_src = true } });
+    defer dev.destroy(image);
+    var pixels = try dev.requestReadImage(image, .{}, .{ .bytes_per_row = 32 });
+    defer pixels.deinit();
+    const data = (try pixels.poll()).?;
+    try std.testing.expectEqual(@as(usize, 48), data.len);
+    for (data) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    try std.testing.expectError(error.ReadFailed, dev.requestReadImage(image, .{ .width = 5 }, .{}));
+    try std.testing.expectError(error.ReadFailed, dev.requestReadImage(image, .{}, .{ .bytes_per_row = 1 }));
+    try std.testing.expectError(error.ReadFailed, dev.requestReadImage(image, .{ .mip_level = 100 }, .{}));
+}
+
+test "devices isolate pools, handles, passes and shutdown from raw API" {
+    const raw = gpu.raw;
+    try raw.setup(std.testing.allocator, .dummy, .{});
+    defer raw.shutdown();
+    const raw_buffer = raw.makeBuffer(.{ .size = 16, .usage = .{ .write_transient = true } });
+    var first = try testDevice(.{ .backend = .dummy, .pools = .{ .buffers = 1 } });
+    var second = try testDevice(.{ .backend = .dummy, .pools = .{ .buffers = 1 } });
+    defer second.deinit();
+    const a = try first.createBuffer(.{ .size = 16, .usage = .{ .writes = .transient } });
+    const b = try second.createBuffer(.{ .size = 32, .usage = .{ .writes = .transient } });
+    try std.testing.expect(a != b);
+    try std.testing.expectEqual(gpu.ResourceState.invalid, second.state(a));
+    second.destroy(a);
+    try std.testing.expectEqual(@as(usize, 32), second.bufferInfo(b).?.size);
+    try std.testing.expectEqual(raw.ResourceState.valid, raw.queryBufferState(raw_buffer));
+    var pass_a = first.beginPass(.{ .target = .{ .swapchain = .{ .width = 8, .height = 8 } } });
+    var pass_b = second.beginPass(.{ .target = .{ .swapchain = .{ .width = 16, .height = 16 } } });
+    pass_a.end();
+    first.commit();
+    pass_b.end();
+    second.commit();
+    try std.testing.expectEqual(@as(u32, 1), first.stats().prev_frame.num_passes);
+    try std.testing.expectEqual(@as(u32, 1), second.stats().prev_frame.num_passes);
+    first.deinit();
+    try std.testing.expectEqual(gpu.ResourceState.valid, second.state(b));
+    try std.testing.expectEqual(raw.ResourceState.valid, raw.queryBufferState(raw_buffer));
+}
+
+test "independent devices run on separate threads" {
+    const Worker = struct {
+        fn run() void {
+            var dev = gpu.Device.init(std.heap.page_allocator, .{ .backend = .dummy }) catch @panic("device init");
+            defer dev.deinit();
+            for (0..1000) |_| {
+                const buf = dev.createBuffer(.{ .size = 16, .usage = .{ .writes = .transient } }) catch @panic("buffer init");
+                std.debug.assert(dev.state(buf) == .valid);
+                dev.destroy(buf);
+                dev.commit();
+            }
+        }
+    };
+    const first = try std.Thread.spawn(.{}, Worker.run, .{});
+    const second = try std.Thread.spawn(.{}, Worker.run, .{});
+    first.join();
+    second.join();
+}
+
+test "device loss is sticky, delivered once, isolated and recoverable" {
+    const Loss = struct {
+        var calls: u32 = 0;
+        var code: i32 = 0;
+        fn received(event: gpu.DeviceLoss) void {
+            calls += 1;
+            code = event.native_code;
+        }
+    };
+    Loss.calls = 0;
+    var first = try gpu.Device.init(std.testing.allocator, .{ .backend = .dummy, .on_device_lost = Loss.received });
+    var other = try gpu.Device.init(std.testing.allocator, .{ .backend = .dummy });
+    defer other.deinit();
+    const old = try first.createBuffer(.{ .size = 16, .usage = .{ .writes = .transient } });
+    first.notifyLost(-4);
+    first.notifyLost(-7);
+    try std.testing.expectEqual(@as(u32, 0), Loss.calls);
+    try std.testing.expect(first.status() == .lost);
+    try std.testing.expectEqual(@as(i32, -4), Loss.code);
+    try std.testing.expect(first.status() == .lost);
+    try std.testing.expectEqual(@as(u32, 1), Loss.calls);
+    try std.testing.expectError(error.DeviceLost, first.createBuffer(.{ .size = 16 }));
+    try std.testing.expect(other.status() == .ready);
+    first.deinit();
+    var recovered = try gpu.Device.init(std.testing.allocator, .{ .backend = .dummy });
+    defer recovered.deinit();
+    _ = try recovered.createBuffer(.{ .size = 16, .usage = .{ .writes = .transient } });
+    try std.testing.expectEqual(gpu.ResourceState.invalid, recovered.state(old));
 }

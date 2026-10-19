@@ -39,3 +39,27 @@ void main() {
 }
 @end
 @program gen_quad gen_quad_cs
+
+@cs fill_r32ui_cs
+layout(binding=0, r32ui) uniform writeonly uimage2D dst_uint_image;
+layout(local_size_x=8, local_size_y=4) in;
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    imageStore(dst_uint_image, p, uvec4(uint(p.x + p.y * 8 + 11), 0u, 0u, 0u));
+}
+@end
+@program fill_r32ui fill_r32ui_cs
+
+@cs fill_rgba16f_cs
+layout(binding=0, rgba16f) uniform writeonly image2D dst_half_image;
+layout(local_size_x=8, local_size_y=4) in;
+void main() { imageStore(dst_half_image, ivec2(gl_GlobalInvocationID.xy), vec4(0.25, 0.5, 0.75, 1.0)); }
+@end
+@program fill_rgba16f fill_rgba16f_cs
+
+@cs fill_rgba32f_cs
+layout(binding=0, rgba32f) uniform writeonly image2D dst_float_image;
+layout(local_size_x=8, local_size_y=4) in;
+void main() { imageStore(dst_float_image, ivec2(gl_GlobalInvocationID.xy), vec4(0.25, 0.5, 0.75, 1.0)); }
+@end
+@program fill_rgba32f fill_rgba32f_cs

@@ -1,4 +1,4 @@
-//! Sokol-to-D3D11 format/state conversion, from sokol_gfx.h:13982-14343.
+//! Shared DXGI and Direct3D format/state conversion, from sokol_gfx.h:13982-14343.
 const t = @import("../../types.zig");
 const e = @import("../../enums.zig");
 const c = @import("constants.zig");

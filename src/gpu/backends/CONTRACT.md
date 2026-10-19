@@ -3,7 +3,7 @@
 The shared core (`core.zig`, `api.zig`, `validation.zig`) implements everything in
 sokol_gfx.h outside the backend sections. `backend.zig` dispatches to the backend
 selected in `setup()`, the counterpart of the "generic backend" section of the
-header (lines 24132-24741). The Vulkan, WebGPU and Metal backends implement this
+header (lines 24132-24741). The Vulkan, WebGPU, D3D12 and Metal backends implement this
 contract directly; the GL and D3D11 backends are adapted by glue in `backend.zig`.
 
 ## Module layout
@@ -95,3 +95,63 @@ and `commandQueue` methods; WebGPU provides `device`, `queue`, `commandEncoder`,
 - `core.config.debug` is the equivalent of `SOKOL_DEBUG`.
 - `core.miplevelDim`, `core.clipRect`, `core.attachmentsDim`, `core.formats.*` for pixel
   format sizes and pitches.
+
+## Readback and synchronization
+
+`readBuffer(self, buf, offset, out) bool` and
+`readImage(self, img, region: *const core.ReadRegion, out) bool` read committed GPU
+work outside a pass. They preserve storage row order and the requested pitches.
+Depth, compressed and multisampled image reads are rejected by the core.
+Synchronous native reads may block; browser WebGPU returns false for them.
+
+All GPU backends also implement owned asynchronous readbacks. Copies are submitted
+at request time; ordinary polling never waits. Vulkan, GL/GLES, D3D11, D3D12 and
+Metal use `readback_task.Task`: the client owns one reference and the Device
+retirement queue another. Prepare queue capacity before recording GPU work;
+register the task after submission. Cancellation drops only the client reference.
+Commit polls retirement without waiting; teardown drains it before native resources
+or loader callbacks are released. Task operations execute in their owning State
+scope, including the last client release after Device retirement has completed.
+
+WebGPU's `requestBufferRead` / `requestImageRead` use heap-owned map/future state.
+Callbacks retain that state after cancellation, and native teardown drains them.
+Every path must keep staging storage, command objects and callbacks alive until
+GPU completion or confirmed device removal. Poll failure cannot justify releasing
+resources while a healthy GPU might still use them. CPU staging/dummy resources
+may complete immediately. Clients release all tickets before destroying the Device
+or unloading its native driver library. Browser hosts must yield to their event
+loop between polls; synchronous browser WebGPU reads return false.
+
+Transfers and resource retirement must respect command recording order. D3D12
+lazily opens a frame for initial/unsealed uploads and retains temporary buffers
+until its fence completes. Vulkan records those uploads in the frame's stream
+command buffer using mapped chunks owned by that frame slot. A completed slot
+caches one normal chunk and discards excess/oversized chunks when it is reused.
+No upload submits or waits per resource. Readback submits pending producer work
+before its copy. Blocking compatibility reads may still use a one-shot list;
+that list never overtakes a pending frame.
+
+
+## Device ownership and loss
+
+Each public Device owns an independent State. `core.enter` selects it for the
+source-shaped internal dispatch and restores the previous selection on return;
+native selection is thread-local. Never cache another Device's selected state or
+use process-global backend data. Public handles include Device identity. The raw
+singleton test API remains separate. Callers synchronize shared native handles
+and invalidate a wrapper's state cache after another wrapper changes the same
+native context.
+
+Loss is recorded once through `core.recordLoss`. Backend callbacks may record the
+atomic loss code, but must not invoke user callbacks from native callback threads.
+The public API delivers the notification on the owning thread and rejects new
+creation/commands after loss. Reinitialization creates a new Device identity;
+resource recovery uses caller-retained CPU descriptors and data.
+
+
+Vulkan readback fence-query errors retain GPU ownership unless completion or
+native device removal is proved. Non-blocking polls never fall back to an idle
+wait; teardown may use one to establish completion. Healthy-device idle failures
+cannot proceed to resource destruction. Pipeline-cache exports validate headers
+using little-endian fields and the complete device UUID; the narrowly guarded
+Mesa/lavapipe short-size workaround is documented at its implementation.

@@ -12,9 +12,9 @@ const sdk = @import("sdk.zig");
 const memory = @import("memory.zig");
 const res = @import("resources.zig");
 const cmds = @import("commands.zig");
-const convert = @import("../d3d11/convert.zig");
-const dx = @import("../d3d11/constants.zig");
-const Compiler = @import("../d3d11/compiler.zig").Compiler;
+const convert = @import("../dxgi/convert.zig");
+const dx = @import("../dxgi/constants.zig");
+const Compiler = @import("../dxgi/compiler.zig").Compiler;
 const Library = @import("../../platform/windows_library.zig").Library;
 
 const num_inflight = @import("../../constants.zig").num_inflight_frames;
@@ -37,6 +37,8 @@ pub const Backend = struct {
     queue: *sdk.Object,
     library: Library,
     serialize: sdk.RootSignatureSerializeFn,
+    serialize_versioned: ?sdk.VersionedRootSignatureSerializeFn = null,
+    root_signature_1_1: bool = false,
     fence: ?*sdk.Object = null,
     fence_event: sdk.Handle = null,
     fence_value: u64 = 0,
@@ -46,6 +48,9 @@ pub const Backend = struct {
     one_shot_allocator: ?*sdk.Object = null,
     one_shot_list: ?*sdk.Object = null,
     deferred: std.ArrayList(memory.Deferred) = .empty,
+    /// Enough spare retirements to destroy every live pool slot (at most two
+    /// descriptors/objects each). Replenished before resource creation/uploads.
+    retirement_budget: usize = 0,
     /// CPU-only descriptor heaps, indexed by `memory.Kind`.
     heaps: [4]memory.Heap = @splat(.{}),
     /// Shader-visible descriptor heaps, sliced per frame.
@@ -82,6 +87,15 @@ pub const Backend = struct {
         _ = sdk.addRef(queue);
         var self: Backend = .{ .allocator = s.allocator, .logger = s.desc.logger, .device = device, .queue = queue, .library = library, .serialize = serialize };
         errdefer self.deinit();
+        self.serialize_versioned = library.lookup(sdk.VersionedRootSignatureSerializeFn, "D3D12SerializeVersionedRootSignature");
+        var highest_root_version: u32 = k.root_signature_version_1_1;
+        self.root_signature_1_1 = self.serialize_versioned != null and sdk.checkFeatureSupport(device, k.feature_root_signature, &highest_root_version, @sizeOf(u32)) >= 0 and highest_root_version >= k.root_signature_version_1_1;
+
+        inline for (.{ "buffer_pool_size", "image_pool_size", "sampler_pool_size", "shader_pool_size", "pipeline_pool_size", "view_pool_size" }) |field| {
+            const count: usize = @intCast(@max(0, @field(s.desc, field)));
+            self.retirement_budget = std.math.add(usize, self.retirement_budget, std.math.mul(usize, count, 2) catch return error.OutOfMemory) catch return error.OutOfMemory;
+        }
+        if (!self.reserveRelease()) return error.OutOfMemory;
         try self.createCommandObjects();
         try self.createHeaps(&s.desc);
         self.initCaps(s);
@@ -143,21 +157,21 @@ pub const Backend = struct {
         const samplers: u32 = @intCast(desc.sampler_pool_size);
         const slots: u32 = @intCast(num_inflight);
         self.swapchain_slots = views;
-        self.heaps[@intFromEnum(memory.Kind.view)] = try memory.Heap.init(self.device, k.heap_type_cbv_srv_uav, 2 * views + 2, false);
-        self.heaps[@intFromEnum(memory.Kind.sampler)] = try memory.Heap.init(self.device, k.heap_type_sampler, samplers + 1, false);
-        self.heaps[@intFromEnum(memory.Kind.rtv)] = try memory.Heap.init(self.device, k.heap_type_rtv, views + slots, false);
-        self.heaps[@intFromEnum(memory.Kind.dsv)] = try memory.Heap.init(self.device, k.heap_type_dsv, views + slots, false);
+        self.heaps[@backingInt(memory.Kind.view)] = try memory.Heap.init(self.allocator, self.device, k.heap_type_cbv_srv_uav, 2 * views + 2, false);
+        self.heaps[@backingInt(memory.Kind.sampler)] = try memory.Heap.init(self.allocator, self.device, k.heap_type_sampler, samplers + 1, false);
+        self.heaps[@backingInt(memory.Kind.rtv)] = try memory.Heap.init(self.allocator, self.device, k.heap_type_rtv, views + slots, false);
+        self.heaps[@backingInt(memory.Kind.dsv)] = try memory.Heap.init(self.allocator, self.device, k.heap_type_dsv, views + slots, false);
         // the reserved swapchain slots are not handed out by allocate()
-        self.heaps[@intFromEnum(memory.Kind.rtv)].capacity = views;
-        self.heaps[@intFromEnum(memory.Kind.dsv)].capacity = views;
+        self.heaps[@backingInt(memory.Kind.rtv)].capacity = views;
+        self.heaps[@backingInt(memory.Kind.dsv)].capacity = views;
 
-        self.srv_ring = .{ .heap = try memory.Heap.init(self.device, k.heap_type_cbv_srv_uav, slots * srv_per_frame, true), .per_frame = srv_per_frame };
-        self.sampler_ring = .{ .heap = try memory.Heap.init(self.device, k.heap_type_sampler, slots * sampler_per_frame, true), .per_frame = sampler_per_frame };
+        self.srv_ring = .{ .heap = try memory.Heap.init(self.allocator, self.device, k.heap_type_cbv_srv_uav, slots * srv_per_frame, true), .per_frame = srv_per_frame };
+        self.sampler_ring = .{ .heap = try memory.Heap.init(self.allocator, self.device, k.heap_type_sampler, slots * sampler_per_frame, true), .per_frame = sampler_per_frame };
 
-        const cpu_view = &self.heaps[@intFromEnum(memory.Kind.view)];
+        const cpu_view = &self.heaps[@backingInt(memory.Kind.view)];
         self.null_srv = cpu_view.allocate();
         self.null_uav = cpu_view.allocate();
-        self.null_sampler = self.heaps[@intFromEnum(memory.Kind.sampler)].allocate();
+        self.null_sampler = self.heaps[@backingInt(memory.Kind.sampler)].allocate();
         const null_srv_desc: sdk.ShaderResourceViewDesc = .{ .format = dx.format_r8g8b8a8_unorm, .view_dimension = k.srv_dimension_texture2d, .payload = .{ .texture_2d = .{ .mip_levels = 1 } } };
         sdk.createShaderResourceView(self.device, null, &null_srv_desc, self.null_srv);
         const null_uav_desc: sdk.UnorderedAccessViewDesc = .{ .format = dx.format_r8g8b8a8_unorm, .view_dimension = k.uav_dimension_texture2d };
@@ -263,20 +277,38 @@ pub const Backend = struct {
         const frame = &self.frames[self.frame_slot];
         if (sdk.listClose(frame.list.?) < 0) core.logError(.d3d12_command_list_failed);
         var lists = [_]?*sdk.Object{frame.list};
+        core.statsInc("d3d12.num_queue_submits");
         sdk.queueExecuteCommandLists(self.queue, 1, &lists);
         self.fence_value += 1;
-        _ = sdk.queueSignal(self.queue, self.fence.?, self.fence_value);
+        self.signalProgress();
         frame.fence_value = self.fence_value;
         self.frame_open = false;
     }
 
+    fn signalProgress(self: *Backend) void {
+        const result = sdk.queueSignal(self.queue, self.fence.?, self.fence_value);
+        if (result < 0) {
+            const reason = sdk.getDeviceRemovedReason(self.device);
+            if (reason >= 0) @panic("D3D12 completion signaling failed without device removal");
+            core.recordLoss(reason);
+        }
+    }
+
     pub fn commit(self: *Backend) void {
-        self.submitFrame();
+        if (self.frame_open) self.submitFrame() else if (self.deferred.items.len > 0) {
+            // Resource-only frames must also advance retirement. This signal is
+            // ordered after private readback submissions without a CPU wait.
+            self.fence_value += 1;
+            self.signalProgress();
+        }
+        self.collectDeferred(false);
     }
 
     /// Starts recording on the one-shot command list, used for initial data, unsealed writes and readback.
     /// `endOneShot` executes it and waits for the GPU to finish it.
     pub fn beginOneShot(self: *Backend) ?*sdk.Object {
+        // A separate list must never execute ahead of recorded frame commands.
+        std.debug.assert(!self.frame_open);
         if (sdk.allocatorReset(self.one_shot_allocator.?) < 0 or sdk.listReset(self.one_shot_list.?, self.one_shot_allocator.?) < 0) {
             core.logError(.d3d12_command_list_failed);
             return null;
@@ -285,26 +317,37 @@ pub const Backend = struct {
     }
 
     pub fn endOneShot(self: *Backend) void {
+        core.statsInc("d3d12.num_one_shot_submits");
         if (sdk.listClose(self.one_shot_list.?) < 0) core.logError(.d3d12_command_list_failed);
         var lists = [_]?*sdk.Object{self.one_shot_list};
+        core.statsInc("d3d12.num_queue_submits");
         sdk.queueExecuteCommandLists(self.queue, 1, &lists);
         self.fence_value += 1;
-        _ = sdk.queueSignal(self.queue, self.fence.?, self.fence_value);
+        self.signalProgress();
         memory.waitFence(self.fence.?, self.fence_event, self.fence_value);
+    }
+
+    /// Reserve before creation, never at destruction: failure leaves existing
+    /// resources/recorded commands untouched. Until the next creation, at most
+    /// retirement_budget live-pool entries and one temporary upload can retire.
+    pub fn reserveRelease(self: *Backend) bool {
+        self.deferred.ensureUnusedCapacity(self.allocator, self.retirement_budget + 1) catch {
+            core.logError(.malloc_failed);
+            return false;
+        };
+        return true;
     }
 
     /// Defers the release of a COM object until the GPU can no longer use it.
     pub fn releaseLater(self: *Backend, object: ?*sdk.Object) void {
         const value = object orelse return;
-        self.deferred.append(self.allocator, .{ .fence_value = self.fence_value + 1, .item = .{ .object = value } }) catch sdk.release(value);
+        self.deferred.appendAssumeCapacity(.{ .fence_value = self.fence_value + 1, .item = .{ .object = value } });
     }
 
     /// Defers the free of a CPU descriptor until the GPU can no longer use it.
     fn freeDescriptorLater(self: *Backend, kind: memory.Kind, handle: usize) void {
         if (handle == 0) return;
-        self.deferred.append(self.allocator, .{ .fence_value = self.fence_value + 1, .item = .{ .descriptor = .{ .kind = kind, .handle = handle } } }) catch {
-            self.heaps[@intFromEnum(kind)].free(self.allocator, handle);
-        };
+        self.deferred.appendAssumeCapacity(.{ .fence_value = self.fence_value + 1, .item = .{ .descriptor = .{ .kind = kind, .handle = handle } } });
     }
 
     /// Releases the deferred items whose fence value completed; with `all`, waits and releases everything.
@@ -315,7 +358,10 @@ pub const Backend = struct {
             self.deferred.clearRetainingCapacity();
             return;
         };
-        if (all) memory.waitFence(fence, self.fence_event, self.fence_value);
+        if (all) {
+            self.submitFrame();
+            memory.waitFence(fence, self.fence_event, self.fence_value);
+        }
         const completed = sdk.fenceCompletedValue(fence);
         var i: usize = 0;
         while (i < self.deferred.items.len) {
@@ -332,13 +378,14 @@ pub const Backend = struct {
     fn releaseItem(self: *Backend, item: memory.Deferred) void {
         switch (item.item) {
             .object => |object| sdk.release(object),
-            .descriptor => |d| self.heaps[@intFromEnum(d.kind)].free(self.allocator, d.handle),
+            .descriptor => |d| self.heaps[@backingInt(d.kind)].free(self.allocator, d.handle),
         }
     }
 
     // ------------------------------------------------------------ resources
 
     pub fn createBuffer(self: *Backend, buf: *core.Buffer, desc: *const t.BufferDesc) e.ResourceState {
+        if (!self.reserveRelease()) return .failed;
         buf.native = .{ .d3d12 = .{} };
         const payload = &buf.native.d3d12;
         std.debug.assert(buf.cmn.size > 0);
@@ -372,6 +419,7 @@ pub const Backend = struct {
     }
 
     pub fn createImage(self: *Backend, img: *core.Image, desc: *const t.ImageDesc) e.ResourceState {
+        if (!self.reserveRelease()) return .failed;
         img.native = .{ .d3d12 = .{} };
         const payload = &img.native.d3d12;
         payload.format = convert.textureFormat(desc.pixel_format);
@@ -414,6 +462,7 @@ pub const Backend = struct {
     }
 
     pub fn createSampler(self: *Backend, smp: *core.Sampler, desc: *const t.SamplerDesc) e.ResourceState {
+        if (!self.reserveRelease()) return .failed;
         smp.native = .{ .d3d12 = .{} };
         const payload = &smp.native.d3d12;
         const native: sdk.SamplerDesc = .{
@@ -431,7 +480,7 @@ pub const Backend = struct {
                 else => .{ 0, 0, 0, 1 },
             },
         };
-        payload.handle = self.heaps[@intFromEnum(memory.Kind.sampler)].allocate();
+        payload.handle = self.heaps[@backingInt(memory.Kind.sampler)].allocate();
         if (payload.handle == 0) {
             core.logError(.d3d12_descriptor_heap_full);
             return .failed;
@@ -480,6 +529,7 @@ pub const Backend = struct {
     }
 
     pub fn createShader(self: *Backend, shd: *core.Shader, desc: *const t.ShaderDesc) e.ResourceState {
+        if (!self.reserveRelease()) return .failed;
         shd.native = .{ .d3d12 = .{} };
         const payload = &shd.native.d3d12;
         for (&payload.semantic_names, &payload.semantic_indices, desc.attrs) |*name, *index, attr| {
@@ -544,14 +594,14 @@ pub const Backend = struct {
                 binding.register = required.storage_image.hlsl_register_u_n;
             }
             payload.views[i] = binding;
-            const kind = @intFromEnum(binding.kind);
+            const kind = @backingInt(binding.kind);
             counts[stage][kind] = @max(counts[stage][kind], @as(u32, binding.register) + 1);
         }
         for (shd.cmn.samplers, desc.samplers, 0..) |sampler, required, i| {
             if (sampler.stage == .none) continue;
             const stage = stageIndex(sampler.stage);
             payload.samplers[i] = .{ .active = true, .stage = @intCast(stage), .kind = .sampler, .register = required.hlsl_register_s_n };
-            const kind = @intFromEnum(res.TableKind.sampler);
+            const kind = @backingInt(res.TableKind.sampler);
             counts[stage][kind] = @max(counts[stage][kind], @as(u32, required.hlsl_register_s_n) + 1);
         }
         const range_types = [_]u32{ k.range_type_srv, k.range_type_uav, k.range_type_sampler };
@@ -568,7 +618,36 @@ pub const Backend = struct {
         const root_desc: sdk.RootSignatureDesc = .{ .num_parameters = @intCast(num_params), .parameters = params[0..num_params].ptr, .flags = flags };
         var blob: ?*sdk.Object = null;
         var error_blob: ?*sdk.Object = null;
-        const status = self.serialize(&root_desc, k.root_signature_version_1_0, &blob, &error_blob);
+        const status = if (self.root_signature_1_1) blk: {
+            var params1: [8 + res.stage_count * 3]sdk.RootParameter1 = undefined;
+            var ranges1: [res.stage_count * 3]sdk.RootDescriptorRange1 = undefined;
+            var range_index: usize = 0;
+            for (params[0..num_params], 0..) |parameter, index| {
+                params1[index] = .{ .parameter_type = parameter.parameter_type, .shader_visibility = parameter.shader_visibility };
+                if (parameter.parameter_type == k.root_parameter_descriptor_table) {
+                    const range = parameter.payload.table.ranges.?[0];
+                    ranges1[range_index] = .{
+                        .range_type = range.range_type,
+                        .num_descriptors = range.num_descriptors,
+                        .base_shader_register = range.base_shader_register,
+                        .register_space = range.register_space,
+                        // Table contents are immutable until its frame fence.
+                        // Keep buffer bounds checks when the driver optimizes static
+                        // descriptors; data may change through ordered uploads/UAVs.
+                        .flags = if (range.range_type == k.range_type_sampler) 0 else k.descriptor_range_data_volatile | k.descriptor_range_static_keeping_buffer_bounds_checks,
+                        .offset_in_descriptors_from_table_start = range.offset_in_descriptors_from_table_start,
+                    };
+                    params1[index].payload = .{ .table = .{ .num_ranges = 1, .ranges = ranges1[range_index..].ptr } };
+                    range_index += 1;
+                } else {
+                    const descriptor = parameter.payload.descriptor;
+                    // Uniform ring bytes are immutable while this binding is used.
+                    params1[index].payload = .{ .descriptor = .{ .shader_register = descriptor.shader_register, .register_space = descriptor.register_space, .flags = k.root_descriptor_data_static_while_set_at_execute } };
+                }
+            }
+            const versioned: sdk.VersionedRootSignatureDesc = .{ .payload = .{ .v1_1 = .{ .num_parameters = @intCast(num_params), .parameters = params1[0..num_params].ptr, .flags = flags } } };
+            break :blk self.serialize_versioned.?(&versioned, &blob, &error_blob);
+        } else self.serialize(&root_desc, k.root_signature_version_1_0, &blob, &error_blob);
         sdk.release(error_blob);
         if (status < 0 or blob == null) {
             core.logError(.d3d12_serialize_root_signature_failed);
@@ -590,6 +669,7 @@ pub const Backend = struct {
     }
 
     pub fn createPipeline(self: *Backend, pip: *core.Pipeline, desc: *const t.PipelineDesc) e.ResourceState {
+        if (!self.reserveRelease()) return .failed;
         _ = desc;
         pip.native = .{ .d3d12 = .{} };
         const payload = &pip.native.d3d12;
@@ -704,13 +784,14 @@ pub const Backend = struct {
 
     /// `view.desc` holds the descriptor with resolved mip and slice counts.
     pub fn createView(self: *Backend, view: *core.View, unresolved: *const t.ViewDesc) e.ResourceState {
+        if (!self.reserveRelease()) return .failed;
         _ = unresolved;
         const desc = &view.desc;
         view.native = .{ .d3d12 = .{} };
         const payload = &view.native.d3d12;
-        const cpu_view = &self.heaps[@intFromEnum(memory.Kind.view)];
-        const cpu_rtv = &self.heaps[@intFromEnum(memory.Kind.rtv)];
-        const cpu_dsv = &self.heaps[@intFromEnum(memory.Kind.dsv)];
+        const cpu_view = &self.heaps[@backingInt(memory.Kind.view)];
+        const cpu_rtv = &self.heaps[@backingInt(memory.Kind.rtv)];
+        const cpu_dsv = &self.heaps[@backingInt(memory.Kind.dsv)];
         switch (view.cmn.type) {
             .storagebuffer => {
                 const buf = view.cmn.buf.ref.get();

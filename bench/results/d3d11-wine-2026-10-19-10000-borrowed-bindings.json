@@ -1,0 +1,1090 @@
+{
+  "schema": 1,
+  "timestamp_utc": "2026-10-19T05:35:09.148439+00:00",
+  "platform": "Linux-7.2.8-200.fc44.x86_64-x86_64-with-glibc2.43",
+  "machine": "x86_64",
+  "binary_sha256": "07d1facc1d09480bb7afda6d463ec552842a66ab7399d76a835631d9934f738a",
+  "method": "rotating process order; warmups excluded; checked pixels and bytes outside timing; GPU drained between samples",
+  "c_readback": "native API equivalent because upstream sokol has no readback API",
+  "runs": [
+    {
+      "round": 0,
+      "command": [
+        "wine",
+        "/home/addo/dev/stupid/zicr/zig-out/bin/zicr-bench-d3d11.exe",
+        "--mode",
+        "c",
+        "--draws",
+        "10000",
+        "--resources",
+        "1000",
+        "--bytes",
+        "4194304",
+        "--samples",
+        "9",
+        "--warmup",
+        "3"
+      ],
+      "result": {
+        "schema": 1,
+        "backend": "d3d11",
+        "mode": "c",
+        "adapter": "AMD Radeon Graphics (RADV RENOIR) (vendor 0x1002, device 0x15e7)",
+        "zig": "0.17.0",
+        "optimize": "fast",
+        "c_compiler": "Clang 22.1.8",
+        "cpu": "x86_64",
+        "validation": false,
+        "statistics": false,
+        "allocator": "std.process.Init.gpa",
+        "warmup": 3,
+        "results": [
+          {
+            "workload": "draws",
+            "operations": 10000,
+            "bytes": 0,
+            "samples_ns": [
+              4071800,
+              4466600,
+              4481600,
+              4741200,
+              4359500,
+              4467600,
+              4655000,
+              4526700,
+              4119700
+            ]
+          },
+          {
+            "workload": "churn",
+            "operations": 1000,
+            "bytes": 0,
+            "samples_ns": [
+              650400,
+              657900,
+              666100,
+              636100,
+              644800,
+              644400,
+              645500,
+              648000,
+              658900
+            ]
+          },
+          {
+            "workload": "upload",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              457700,
+              476600,
+              444300,
+              515900,
+              741400,
+              466700,
+              405100,
+              455300,
+              423300
+            ]
+          },
+          {
+            "workload": "readback",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              1055600,
+              1012200,
+              1100100,
+              1066800,
+              1005900,
+              1025200,
+              1866300,
+              1271600,
+              1132900
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "round": 0,
+      "command": [
+        "wine",
+        "/home/addo/dev/stupid/zicr/zig-out/bin/zicr-bench-d3d11.exe",
+        "--mode",
+        "raw",
+        "--draws",
+        "10000",
+        "--resources",
+        "1000",
+        "--bytes",
+        "4194304",
+        "--samples",
+        "9",
+        "--warmup",
+        "3"
+      ],
+      "result": {
+        "schema": 1,
+        "backend": "d3d11",
+        "mode": "raw",
+        "adapter": "AMD Radeon Graphics (RADV RENOIR) (vendor 0x1002, device 0x15e7)",
+        "zig": "0.17.0",
+        "optimize": "fast",
+        "c_compiler": "Clang 22.1.8",
+        "cpu": "x86_64",
+        "validation": false,
+        "statistics": false,
+        "allocator": "std.process.Init.gpa",
+        "warmup": 3,
+        "results": [
+          {
+            "workload": "draws",
+            "operations": 10000,
+            "bytes": 0,
+            "samples_ns": [
+              5955500,
+              6099900,
+              5875600,
+              5865100,
+              6121800,
+              5912800,
+              5900100,
+              5913900,
+              5946500
+            ]
+          },
+          {
+            "workload": "churn",
+            "operations": 1000,
+            "bytes": 0,
+            "samples_ns": [
+              669300,
+              668300,
+              669000,
+              670800,
+              660100,
+              662700,
+              663300,
+              669900,
+              667700
+            ]
+          },
+          {
+            "workload": "upload",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              525900,
+              500200,
+              485000,
+              490200,
+              486100,
+              513800,
+              437500,
+              434800,
+              530200
+            ]
+          },
+          {
+            "workload": "readback",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              1165200,
+              1129700,
+              1359400,
+              1499900,
+              1226100,
+              1074700,
+              1068400,
+              1063400,
+              1185600
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "round": 0,
+      "command": [
+        "wine",
+        "/home/addo/dev/stupid/zicr/zig-out/bin/zicr-bench-d3d11.exe",
+        "--mode",
+        "public",
+        "--draws",
+        "10000",
+        "--resources",
+        "1000",
+        "--bytes",
+        "4194304",
+        "--samples",
+        "9",
+        "--warmup",
+        "3"
+      ],
+      "result": {
+        "schema": 1,
+        "backend": "d3d11",
+        "mode": "public",
+        "adapter": "AMD Radeon Graphics (RADV RENOIR) (vendor 0x1002, device 0x15e7)",
+        "zig": "0.17.0",
+        "optimize": "fast",
+        "c_compiler": "Clang 22.1.8",
+        "cpu": "x86_64",
+        "validation": false,
+        "statistics": false,
+        "allocator": "std.process.Init.gpa",
+        "warmup": 3,
+        "results": [
+          {
+            "workload": "draws",
+            "operations": 10000,
+            "bytes": 0,
+            "samples_ns": [
+              5990800,
+              6065400,
+              5996500,
+              5958000,
+              6170300,
+              6081200,
+              6088300,
+              6061700,
+              6407600
+            ]
+          },
+          {
+            "workload": "churn",
+            "operations": 1000,
+            "bytes": 0,
+            "samples_ns": [
+              725000,
+              707700,
+              697800,
+              733300,
+              719500,
+              721900,
+              712500,
+              700700,
+              700400
+            ]
+          },
+          {
+            "workload": "upload",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              449700,
+              458900,
+              465100,
+              413500,
+              432300,
+              447900,
+              474300,
+              436700,
+              424400
+            ]
+          },
+          {
+            "workload": "readback",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              1318800,
+              1174100,
+              1217700,
+              1462000,
+              1150400,
+              1158700,
+              1149800,
+              1106800,
+              1380900
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "round": 1,
+      "command": [
+        "wine",
+        "/home/addo/dev/stupid/zicr/zig-out/bin/zicr-bench-d3d11.exe",
+        "--mode",
+        "raw",
+        "--draws",
+        "10000",
+        "--resources",
+        "1000",
+        "--bytes",
+        "4194304",
+        "--samples",
+        "9",
+        "--warmup",
+        "3"
+      ],
+      "result": {
+        "schema": 1,
+        "backend": "d3d11",
+        "mode": "raw",
+        "adapter": "AMD Radeon Graphics (RADV RENOIR) (vendor 0x1002, device 0x15e7)",
+        "zig": "0.17.0",
+        "optimize": "fast",
+        "c_compiler": "Clang 22.1.8",
+        "cpu": "x86_64",
+        "validation": false,
+        "statistics": false,
+        "allocator": "std.process.Init.gpa",
+        "warmup": 3,
+        "results": [
+          {
+            "workload": "draws",
+            "operations": 10000,
+            "bytes": 0,
+            "samples_ns": [
+              5927700,
+              5841900,
+              5726000,
+              5784100,
+              5858900,
+              5856500,
+              6001000,
+              5919500,
+              5861900
+            ]
+          },
+          {
+            "workload": "churn",
+            "operations": 1000,
+            "bytes": 0,
+            "samples_ns": [
+              720100,
+              692200,
+              654600,
+              655400,
+              668900,
+              666500,
+              692200,
+              656900,
+              664400
+            ]
+          },
+          {
+            "workload": "upload",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              417100,
+              437100,
+              435500,
+              481600,
+              480100,
+              480600,
+              394200,
+              422900,
+              427600
+            ]
+          },
+          {
+            "workload": "readback",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              1217200,
+              1132600,
+              1166000,
+              1267000,
+              1613000,
+              1508700,
+              1218900,
+              1288800,
+              1192700
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "round": 1,
+      "command": [
+        "wine",
+        "/home/addo/dev/stupid/zicr/zig-out/bin/zicr-bench-d3d11.exe",
+        "--mode",
+        "public",
+        "--draws",
+        "10000",
+        "--resources",
+        "1000",
+        "--bytes",
+        "4194304",
+        "--samples",
+        "9",
+        "--warmup",
+        "3"
+      ],
+      "result": {
+        "schema": 1,
+        "backend": "d3d11",
+        "mode": "public",
+        "adapter": "AMD Radeon Graphics (RADV RENOIR) (vendor 0x1002, device 0x15e7)",
+        "zig": "0.17.0",
+        "optimize": "fast",
+        "c_compiler": "Clang 22.1.8",
+        "cpu": "x86_64",
+        "validation": false,
+        "statistics": false,
+        "allocator": "std.process.Init.gpa",
+        "warmup": 3,
+        "results": [
+          {
+            "workload": "draws",
+            "operations": 10000,
+            "bytes": 0,
+            "samples_ns": [
+              5979800,
+              6005400,
+              5992300,
+              6040600,
+              6072700,
+              6013100,
+              6139100,
+              5899700,
+              5932000
+            ]
+          },
+          {
+            "workload": "churn",
+            "operations": 1000,
+            "bytes": 0,
+            "samples_ns": [
+              717600,
+              713900,
+              716300,
+              717700,
+              695000,
+              692800,
+              764500,
+              703800,
+              718000
+            ]
+          },
+          {
+            "workload": "upload",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              484900,
+              529700,
+              459400,
+              415300,
+              465400,
+              483400,
+              445400,
+              483500,
+              586100
+            ]
+          },
+          {
+            "workload": "readback",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              1202100,
+              986100,
+              1062700,
+              1236000,
+              1035600,
+              969500,
+              1068900,
+              1278800,
+              1090100
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "round": 1,
+      "command": [
+        "wine",
+        "/home/addo/dev/stupid/zicr/zig-out/bin/zicr-bench-d3d11.exe",
+        "--mode",
+        "c",
+        "--draws",
+        "10000",
+        "--resources",
+        "1000",
+        "--bytes",
+        "4194304",
+        "--samples",
+        "9",
+        "--warmup",
+        "3"
+      ],
+      "result": {
+        "schema": 1,
+        "backend": "d3d11",
+        "mode": "c",
+        "adapter": "AMD Radeon Graphics (RADV RENOIR) (vendor 0x1002, device 0x15e7)",
+        "zig": "0.17.0",
+        "optimize": "fast",
+        "c_compiler": "Clang 22.1.8",
+        "cpu": "x86_64",
+        "validation": false,
+        "statistics": false,
+        "allocator": "std.process.Init.gpa",
+        "warmup": 3,
+        "results": [
+          {
+            "workload": "draws",
+            "operations": 10000,
+            "bytes": 0,
+            "samples_ns": [
+              4213500,
+              4489500,
+              4364200,
+              4238300,
+              4240800,
+              4555000,
+              4434400,
+              4809800,
+              4935400
+            ]
+          },
+          {
+            "workload": "churn",
+            "operations": 1000,
+            "bytes": 0,
+            "samples_ns": [
+              639400,
+              642600,
+              653200,
+              653400,
+              647800,
+              651300,
+              652600,
+              667800,
+              648400
+            ]
+          },
+          {
+            "workload": "upload",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              538100,
+              411900,
+              464000,
+              467300,
+              430400,
+              524400,
+              447100,
+              433600,
+              482000
+            ]
+          },
+          {
+            "workload": "readback",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              1385700,
+              1420700,
+              1344700,
+              1318500,
+              1547300,
+              1236000,
+              1395600,
+              1318400,
+              1233700
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "round": 2,
+      "command": [
+        "wine",
+        "/home/addo/dev/stupid/zicr/zig-out/bin/zicr-bench-d3d11.exe",
+        "--mode",
+        "public",
+        "--draws",
+        "10000",
+        "--resources",
+        "1000",
+        "--bytes",
+        "4194304",
+        "--samples",
+        "9",
+        "--warmup",
+        "3"
+      ],
+      "result": {
+        "schema": 1,
+        "backend": "d3d11",
+        "mode": "public",
+        "adapter": "AMD Radeon Graphics (RADV RENOIR) (vendor 0x1002, device 0x15e7)",
+        "zig": "0.17.0",
+        "optimize": "fast",
+        "c_compiler": "Clang 22.1.8",
+        "cpu": "x86_64",
+        "validation": false,
+        "statistics": false,
+        "allocator": "std.process.Init.gpa",
+        "warmup": 3,
+        "results": [
+          {
+            "workload": "draws",
+            "operations": 10000,
+            "bytes": 0,
+            "samples_ns": [
+              6367900,
+              6508700,
+              6383400,
+              6395400,
+              6510300,
+              6441500,
+              6402500,
+              6466900,
+              6401600
+            ]
+          },
+          {
+            "workload": "churn",
+            "operations": 1000,
+            "bytes": 0,
+            "samples_ns": [
+              762400,
+              697800,
+              693700,
+              712500,
+              715500,
+              715700,
+              696500,
+              692900,
+              693200
+            ]
+          },
+          {
+            "workload": "upload",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              412700,
+              465200,
+              455600,
+              436200,
+              530200,
+              387500,
+              445300,
+              486400,
+              493500
+            ]
+          },
+          {
+            "workload": "readback",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              1161500,
+              1087600,
+              1049300,
+              1293300,
+              1273800,
+              1286500,
+              1881900,
+              1293600,
+              1059600
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "round": 2,
+      "command": [
+        "wine",
+        "/home/addo/dev/stupid/zicr/zig-out/bin/zicr-bench-d3d11.exe",
+        "--mode",
+        "c",
+        "--draws",
+        "10000",
+        "--resources",
+        "1000",
+        "--bytes",
+        "4194304",
+        "--samples",
+        "9",
+        "--warmup",
+        "3"
+      ],
+      "result": {
+        "schema": 1,
+        "backend": "d3d11",
+        "mode": "c",
+        "adapter": "AMD Radeon Graphics (RADV RENOIR) (vendor 0x1002, device 0x15e7)",
+        "zig": "0.17.0",
+        "optimize": "fast",
+        "c_compiler": "Clang 22.1.8",
+        "cpu": "x86_64",
+        "validation": false,
+        "statistics": false,
+        "allocator": "std.process.Init.gpa",
+        "warmup": 3,
+        "results": [
+          {
+            "workload": "draws",
+            "operations": 10000,
+            "bytes": 0,
+            "samples_ns": [
+              4543800,
+              4319500,
+              4340500,
+              4449500,
+              4576500,
+              4420500,
+              4887300,
+              4139000,
+              4073700
+            ]
+          },
+          {
+            "workload": "churn",
+            "operations": 1000,
+            "bytes": 0,
+            "samples_ns": [
+              654900,
+              654400,
+              646600,
+              652500,
+              635500,
+              637500,
+              635300,
+              647800,
+              648500
+            ]
+          },
+          {
+            "workload": "upload",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              486900,
+              600000,
+              452100,
+              467000,
+              659100,
+              543400,
+              381700,
+              456900,
+              502200
+            ]
+          },
+          {
+            "workload": "readback",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              1104600,
+              1168300,
+              1113200,
+              1066100,
+              1142100,
+              1134900,
+              1795400,
+              1273400,
+              1126400
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "round": 2,
+      "command": [
+        "wine",
+        "/home/addo/dev/stupid/zicr/zig-out/bin/zicr-bench-d3d11.exe",
+        "--mode",
+        "raw",
+        "--draws",
+        "10000",
+        "--resources",
+        "1000",
+        "--bytes",
+        "4194304",
+        "--samples",
+        "9",
+        "--warmup",
+        "3"
+      ],
+      "result": {
+        "schema": 1,
+        "backend": "d3d11",
+        "mode": "raw",
+        "adapter": "AMD Radeon Graphics (RADV RENOIR) (vendor 0x1002, device 0x15e7)",
+        "zig": "0.17.0",
+        "optimize": "fast",
+        "c_compiler": "Clang 22.1.8",
+        "cpu": "x86_64",
+        "validation": false,
+        "statistics": false,
+        "allocator": "std.process.Init.gpa",
+        "warmup": 3,
+        "results": [
+          {
+            "workload": "draws",
+            "operations": 10000,
+            "bytes": 0,
+            "samples_ns": [
+              6273500,
+              7244700,
+              5966300,
+              5879400,
+              5876400,
+              6781700,
+              5883900,
+              5879700,
+              5827900
+            ]
+          },
+          {
+            "workload": "churn",
+            "operations": 1000,
+            "bytes": 0,
+            "samples_ns": [
+              665700,
+              854900,
+              664600,
+              880100,
+              984900,
+              664400,
+              666400,
+              690800,
+              659000
+            ]
+          },
+          {
+            "workload": "upload",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              362200,
+              414100,
+              416000,
+              317000,
+              348800,
+              360400,
+              371800,
+              398500,
+              482300
+            ]
+          },
+          {
+            "workload": "readback",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              1400900,
+              1276800,
+              1269800,
+              1371700,
+              1178200,
+              1196100,
+              1179900,
+              1167000,
+              1442000
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "summary": [
+    {
+      "mode": "c",
+      "workload": "draws",
+      "samples": 27,
+      "median_ns": 4449500,
+      "min_ns": 4071800,
+      "max_ns": 4935400,
+      "mean_ns": 4441514.814814814,
+      "stdev_ns": 232601.32069157387,
+      "coefficient_of_variation": 0.05236981759370131,
+      "cpu_ns_per_operation": 444.95,
+      "operations": 10000,
+      "bytes": 0,
+      "time_relative_to_c": 1.0
+    },
+    {
+      "mode": "c",
+      "workload": "churn",
+      "samples": 27,
+      "median_ns": 648400,
+      "min_ns": 635300,
+      "max_ns": 667800,
+      "mean_ns": 648948.1481481482,
+      "stdev_ns": 8365.33002569214,
+      "coefficient_of_variation": 0.012890598500918166,
+      "cpu_ns_per_operation": 648.4,
+      "operations": 1000,
+      "bytes": 0,
+      "time_relative_to_c": 1.0
+    },
+    {
+      "mode": "c",
+      "workload": "upload",
+      "samples": 27,
+      "median_ns": 466700,
+      "min_ns": 381700,
+      "max_ns": 741400,
+      "mean_ns": 486459.25925925927,
+      "stdev_ns": 77996.4558329872,
+      "coefficient_of_variation": 0.1603350215838298,
+      "cpu_ns_per_operation": 466700.0,
+      "operations": 1,
+      "bytes": 4194304,
+      "GiB_per_second": 8.369937861581315,
+      "time_relative_to_c": 1.0
+    },
+    {
+      "mode": "c",
+      "workload": "readback",
+      "samples": 27,
+      "median_ns": 1168300,
+      "min_ns": 1005900,
+      "max_ns": 1866300,
+      "mean_ns": 1246725.9259259258,
+      "stdev_ns": 219148.11919829051,
+      "coefficient_of_variation": 0.17577890588545536,
+      "cpu_ns_per_operation": 1168300.0,
+      "operations": 1,
+      "bytes": 4194304,
+      "GiB_per_second": 3.34353333903963,
+      "time_relative_to_c": 1.0
+    },
+    {
+      "mode": "raw",
+      "workload": "draws",
+      "samples": 27,
+      "median_ns": 5900100,
+      "min_ns": 5726000,
+      "max_ns": 7244700,
+      "mean_ns": 5999340.740740741,
+      "stdev_ns": 318043.564092985,
+      "coefficient_of_variation": 0.05301308557675223,
+      "cpu_ns_per_operation": 590.01,
+      "operations": 10000,
+      "bytes": 0,
+      "time_relative_to_c": 1.3260141588942578
+    },
+    {
+      "mode": "raw",
+      "workload": "churn",
+      "samples": 27,
+      "median_ns": 667700,
+      "min_ns": 654600,
+      "max_ns": 984900,
+      "mean_ns": 696411.1111111111,
+      "stdev_ns": 79341.72116830286,
+      "coefficient_of_variation": 0.11392943033564557,
+      "cpu_ns_per_operation": 667.7,
+      "operations": 1000,
+      "bytes": 0,
+      "time_relative_to_c": 1.0297655768044418
+    },
+    {
+      "mode": "raw",
+      "workload": "upload",
+      "samples": 27,
+      "median_ns": 435500,
+      "min_ns": 317000,
+      "max_ns": 530200,
+      "mean_ns": 438944.44444444444,
+      "stdev_ns": 57038.32269983275,
+      "coefficient_of_variation": 0.12994428662156557,
+      "cpu_ns_per_operation": 435500.0,
+      "operations": 1,
+      "bytes": 4194304,
+      "GiB_per_second": 8.969575200918484,
+      "time_relative_to_c": 0.9331476323119777
+    },
+    {
+      "mode": "raw",
+      "workload": "readback",
+      "samples": 27,
+      "median_ns": 1217200,
+      "min_ns": 1063400,
+      "max_ns": 1613000,
+      "mean_ns": 1254062.962962963,
+      "stdev_ns": 141551.32841304803,
+      "coefficient_of_variation": 0.11287417984070434,
+      "cpu_ns_per_operation": 1217200.0,
+      "operations": 1,
+      "bytes": 4194304,
+      "GiB_per_second": 3.2092096615182384,
+      "time_relative_to_c": 1.0418556877514338
+    },
+    {
+      "mode": "public",
+      "workload": "draws",
+      "samples": 27,
+      "median_ns": 6081200,
+      "min_ns": 5899700,
+      "max_ns": 6510300,
+      "mean_ns": 6176766.666666667,
+      "stdev_ns": 206763.62200497306,
+      "coefficient_of_variation": 0.03347441034494418,
+      "cpu_ns_per_operation": 608.12,
+      "operations": 10000,
+      "bytes": 0,
+      "time_relative_to_c": 1.366715361276548
+    },
+    {
+      "mode": "public",
+      "workload": "churn",
+      "samples": 27,
+      "median_ns": 712500,
+      "min_ns": 692800,
+      "max_ns": 764500,
+      "mean_ns": 712540.7407407408,
+      "stdev_ns": 18518.33310448489,
+      "coefficient_of_variation": 0.025989156894009543,
+      "cpu_ns_per_operation": 712.5,
+      "operations": 1000,
+      "bytes": 0,
+      "time_relative_to_c": 1.0988587291795189
+    },
+    {
+      "mode": "public",
+      "workload": "upload",
+      "samples": 27,
+      "median_ns": 458900,
+      "min_ns": 387500,
+      "max_ns": 586100,
+      "mean_ns": 461796.2962962963,
+      "stdev_ns": 41568.52064762359,
+      "coefficient_of_variation": 0.09001484200070874,
+      "cpu_ns_per_operation": 458900.0,
+      "operations": 1,
+      "bytes": 4194304,
+      "GiB_per_second": 8.51220309435607,
+      "time_relative_to_c": 0.9832869080779945
+    },
+    {
+      "mode": "public",
+      "workload": "readback",
+      "samples": 27,
+      "median_ns": 1161500,
+      "min_ns": 969500,
+      "max_ns": 1881900,
+      "mean_ns": 1201337.037037037,
+      "stdev_ns": 182424.71608046163,
+      "coefficient_of_variation": 0.15185140427401764,
+      "cpu_ns_per_operation": 1161500.0,
+      "operations": 1,
+      "bytes": 4194304,
+      "GiB_per_second": 3.3631080499354282,
+      "time_relative_to_c": 0.9941795771633998
+    }
+  ]
+}

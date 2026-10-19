@@ -1,8 +1,9 @@
 //! Native D3D12 tokens used by the backend, from the Windows SDK d3d12.h.
-//! Format, filter and state values shared with D3D11 come from ../d3d11/constants.zig.
+//! Format, filter and state values shared with D3D11 come from ../dxgi/constants.zig.
 
 // D3D12_FEATURE, D3D12_FORMAT_SUPPORT2
 pub const feature_format_support: u32 = 3;
+pub const feature_root_signature: u32 = 12;
 pub const format_support2_uav_typed_load: u32 = 0x40;
 pub const format_support2_uav_typed_store: u32 = 0x80;
 
@@ -95,6 +96,10 @@ pub const range_type_uav: u32 = 1;
 pub const range_type_sampler: u32 = 3;
 pub const root_signature_flag_allow_input_assembler_input_layout: u32 = 0x1;
 pub const root_signature_version_1_0: u32 = 0x1;
+pub const root_signature_version_1_1: u32 = 0x2;
+pub const descriptor_range_data_volatile: u32 = 0x2;
+pub const descriptor_range_static_keeping_buffer_bounds_checks: u32 = 0x10000;
+pub const root_descriptor_data_static_while_set_at_execute: u32 = 0x4;
 pub const descriptor_range_offset_append: u32 = 0xffffffff;
 
 // Copies and alignment

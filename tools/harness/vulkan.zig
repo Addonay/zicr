@@ -4,8 +4,11 @@
 //! synchronization2, buffer device address and VK_EXT_descriptor_buffer. A debug messenger counts the
 //! errors and warnings the validation layer reports for takeNativeErrors().
 const std = @import("std");
+const builtin = @import("builtin");
+const Loader = if (builtin.os.tag == .windows) gpu.raw.native.WindowsLibrary else std.DynLib;
 const gpu = @import("zicr").gpu;
 const harness = @import("harness.zig");
+const Window = @import("vulkan_window.zig").Window;
 
 const Instance = ?*anyopaque;
 const PhysicalDevice = ?*anyopaque;
@@ -76,11 +79,22 @@ const DebugUtilsMessengerCreateInfoEXT = extern struct {
     pUserData: ?*anyopaque = null,
 };
 
+const ExtensionProperties = extern struct { name: [256]u8, version: u32 };
+const SwapchainMaintenanceFeatures = extern struct {
+    sType: i32 = 1000275000,
+    pNext: ?*anyopaque = null,
+    swapchainMaintenance1: u32 = 0,
+};
+
 /// Loader and driver entry points, resolved through vkGetInstanceProcAddr.
 const Vk = struct {
+    vkEnumerateInstanceExtensionProperties: *const fn (?[*:0]const u8, *u32, ?[*]ExtensionProperties) callconv(.c) i32 = undefined,
+    vkEnumerateDeviceExtensionProperties: *const fn (PhysicalDevice, ?[*:0]const u8, *u32, ?[*]ExtensionProperties) callconv(.c) i32 = undefined,
+    vkGetPhysicalDeviceFeatures2: *const fn (PhysicalDevice, *PhysicalDeviceFeatures2) callconv(.c) void = undefined,
     vkCreateInstance: *const fn (*const InstanceCreateInfo, ?*const AllocationCallbacks, *Instance) callconv(.c) i32 = undefined,
     vkEnumerateInstanceLayerProperties: *const fn (*u32, ?[*]LayerProperties) callconv(.c) i32 = undefined,
     vkEnumeratePhysicalDevices: *const fn (Instance, *u32, ?[*]PhysicalDevice) callconv(.c) i32 = undefined,
+    vkGetPhysicalDeviceFeatures: *const fn (PhysicalDevice, *PhysicalDeviceFeatures) callconv(.c) void = undefined,
     vkGetPhysicalDeviceProperties: *const fn (PhysicalDevice, *PhysicalDeviceProperties) callconv(.c) void = undefined,
     vkGetPhysicalDeviceQueueFamilyProperties: *const fn (PhysicalDevice, *u32, ?[*]QueueFamilyProperties) callconv(.c) void = undefined,
     vkCreateDevice: *const fn (PhysicalDevice, *const DeviceCreateInfo, ?*const AllocationCallbacks, *Device) callconv(.c) i32 = undefined,
@@ -99,12 +113,10 @@ fn loadVk(out: *Vk, get: GetInstanceProcAddr, handle: anytype) void {
     }
 }
 
-/// Native errors and warnings reported by the validation layer since the last takeNativeErrors().
-var native_errors: u32 = 0;
-
-fn debugCallback(severity: u32, _: u32, data: *const DebugUtilsMessengerCallbackDataEXT, _: ?*anyopaque) callconv(.c) u32 {
+fn debugCallback(severity: u32, _: u32, data: *const DebugUtilsMessengerCallbackDataEXT, user_data: ?*anyopaque) callconv(.c) u32 {
     if (severity & (DEBUG_SEVERITY_ERROR | DEBUG_SEVERITY_WARNING) != 0) {
-        native_errors += 1;
+        const self: *Context = @ptrCast(@alignCast(user_data.?));
+        _ = self.native_errors.fetchAdd(1, .monotonic);
         const message = if (data.pMessage) |m| std.mem.span(m) else "";
         std.debug.print("vulkan validation (severity 0x{x}): {s}\n", .{ severity, message });
     }
@@ -113,7 +125,8 @@ fn debugCallback(severity: u32, _: u32, data: *const DebugUtilsMessengerCallback
 
 pub const Context = struct {
     gpa: std.mem.Allocator,
-    lib: std.DynLib,
+    native_errors: std.atomic.Value(u32) = .init(0),
+    lib: Loader,
     get_instance: GetInstanceProcAddr,
     vk: Vk,
     instance: Instance,
@@ -122,14 +135,39 @@ pub const Context = struct {
     device: Device,
     queue: Queue,
     queue_family_index: u32,
+    descriptor_buffer: bool,
+    native_validation: bool,
     name: []u8,
+    window: ?Window = null,
+
+    pub fn validationAvailable(self: *Context) bool {
+        return self.native_validation and self.messenger != 0;
+    }
 
     pub fn create(gpa: std.mem.Allocator, variant: harness.Variant) !*Context {
-        _ = variant;
+        return createImpl(gpa, variant, false, true);
+    }
+
+    pub fn createWindow(gpa: std.mem.Allocator, variant: harness.Variant) !*Context {
+        return createImpl(gpa, variant, true, true);
+    }
+
+    pub fn createBenchmark(gpa: std.mem.Allocator, variant: harness.Variant) !*Context {
+        return createImpl(gpa, variant, false, false);
+    }
+
+    pub fn drain(self: *Context) void {
+        if (self.vk.vkDeviceWaitIdle(self.device) != SUCCESS) @panic("benchmark GPU drain failed");
+    }
+
+    fn createImpl(gpa: std.mem.Allocator, variant: harness.Variant, windowed: bool, request_validation: bool) !*Context {
         const self = try gpa.create(Context);
         errdefer gpa.destroy(self);
         self.gpa = gpa;
-        self.lib = try std.DynLib.open("libvulkan.so.1");
+        self.window = null;
+        self.native_errors = .init(0);
+        self.descriptor_buffer = variant == .vulkan_descriptor_buffer;
+        self.lib = try Loader.open(if (builtin.os.tag == .windows) "vulkan-1.dll" else "libvulkan.so.1");
         errdefer self.lib.close();
         self.get_instance = self.lib.lookup(GetInstanceProcAddr, "vkGetInstanceProcAddr") orelse return error.MissingVulkanLoader;
         var global: Vk = .{};
@@ -138,26 +176,47 @@ pub const Context = struct {
         var layer_count: u32 = 0;
         _ = global.vkEnumerateInstanceLayerProperties(&layer_count, null);
         var layers: [64]LayerProperties = undefined;
+        layer_count = @min(layer_count, layers.len);
         _ = global.vkEnumerateInstanceLayerProperties(&layer_count, &layers);
         var validation = false;
         for (layers[0..@min(layer_count, layers.len)]) |*layer| {
             if (std.mem.eql(u8, std.mem.sliceTo(&layer.layerName, 0), "VK_LAYER_KHRONOS_validation")) validation = true;
         }
+        validation = validation and request_validation;
+        self.native_validation = validation;
         const validation_layer = [_][*:0]const u8{"VK_LAYER_KHRONOS_validation"};
         // VK_KHR_surface is required by VK_KHR_swapchain, which the device enables
-        const instance_ext = [_][*:0]const u8{ "VK_KHR_surface", "VK_EXT_debug_utils" };
+        const instance_ext = [_][*:0]const u8{ "VK_KHR_surface", "VK_EXT_debug_utils", "VK_EXT_validation_features" };
+        const window_ext = [_][*:0]const u8{ "VK_KHR_surface", if (builtin.os.tag == .windows) "VK_KHR_win32_surface" else "VK_KHR_xlib_surface", "VK_KHR_get_surface_capabilities2", "VK_EXT_surface_maintenance1", "VK_EXT_debug_utils", "VK_EXT_validation_features" };
+        if (windowed) {
+            var count: u32 = 0;
+            if (global.vkEnumerateInstanceExtensionProperties(null, &count, null) != SUCCESS or count > 512) return error.ExtensionEnumerationFailed;
+            var extensions: [512]ExtensionProperties = undefined;
+            if (global.vkEnumerateInstanceExtensionProperties(null, &count, &extensions) != SUCCESS) return error.ExtensionEnumerationFailed;
+            for (window_ext[2..4]) |required| {
+                var found = false;
+                for (extensions[0..count]) |*extension| if (std.mem.eql(u8, std.mem.sliceTo(&extension.name, 0), std.mem.span(required))) {
+                    found = true;
+                    break;
+                };
+                if (!found) return error.PresentFenceExtensionsUnavailable;
+            }
+        }
+        const sync_feature: u32 = 4;
+        const validation_features: ValidationFeatures = .{ .enabledValidationFeatureCount = 1, .pEnabledValidationFeatures = @ptrCast(&sync_feature) };
         const app_info: ApplicationInfo = .{ .pApplicationName = "zicr scenes", .apiVersion = API_VERSION_1_3 };
         const instance_info: InstanceCreateInfo = .{
+            .pNext = if (validation) &validation_features else null,
             .pApplicationInfo = &app_info,
             .enabledLayerCount = if (validation) 1 else 0,
             .ppEnabledLayerNames = if (validation) &validation_layer else null,
-            .enabledExtensionCount = if (validation) 2 else 1,
-            .ppEnabledExtensionNames = &instance_ext,
+            .enabledExtensionCount = if (windowed) (if (validation) @as(u32, 6) else 4) else (if (validation) @as(u32, 3) else 1),
+            .ppEnabledExtensionNames = if (windowed) &window_ext else &instance_ext,
         };
         if (global.vkCreateInstance(&instance_info, null, &self.instance) != SUCCESS) return error.VulkanInitFailed;
-        errdefer _ = global.vkDestroyInstance(self.instance, null);
         self.vk = .{};
         loadVk(&self.vk, self.get_instance, self.instance);
+        errdefer self.vk.vkDestroyInstance(self.instance, null);
 
         self.messenger = 0;
         if (validation) {
@@ -165,6 +224,7 @@ pub const Context = struct {
                 .messageSeverity = DEBUG_SEVERITY_ERROR | DEBUG_SEVERITY_WARNING | 0x1,
                 .messageType = DEBUG_TYPE_ALL,
                 .pfnUserCallback = debugCallback,
+                .pUserData = self,
             };
             if (self.vk.vkCreateDebugUtilsMessengerEXT(self.instance, &messenger_info, null, &self.messenger) != SUCCESS) return error.VulkanInitFailed;
         }
@@ -201,28 +261,68 @@ pub const Context = struct {
         // device with the features the Vulkan backend needs
         const priority: f32 = 1.0;
         const queue_info: DeviceQueueCreateInfo = .{ .queueFamilyIndex = family, .queueCount = 1, .pQueuePriorities = @ptrCast(&priority) };
-        var dbuf_features: PhysicalDeviceDescriptorBufferFeaturesEXT = .{ .sType = 1000316002, .descriptorBuffer = TRUE };
-        var features13: PhysicalDeviceVulkan13Features = .{ .sType = 53, .pNext = &dbuf_features, .dynamicRendering = TRUE, .synchronization2 = TRUE };
+        var maintenance: SwapchainMaintenanceFeatures = .{};
+        if (windowed) {
+            var count: u32 = 0;
+            if (self.vk.vkEnumerateDeviceExtensionProperties(physical, null, &count, null) != SUCCESS or count > 512) return error.ExtensionEnumerationFailed;
+            var extensions: [512]ExtensionProperties = undefined;
+            if (self.vk.vkEnumerateDeviceExtensionProperties(physical, null, &count, &extensions) != SUCCESS) return error.ExtensionEnumerationFailed;
+            var found = false;
+            for (extensions[0..count]) |*extension| if (std.mem.eql(u8, std.mem.sliceTo(&extension.name, 0), "VK_EXT_swapchain_maintenance1")) {
+                found = true;
+                break;
+            };
+            if (!found) return error.PresentFenceExtensionsUnavailable;
+            var query: PhysicalDeviceFeatures2 = .{ .pNext = &maintenance };
+            self.vk.vkGetPhysicalDeviceFeatures2(physical, &query);
+            if (maintenance.swapchainMaintenance1 == FALSE) return error.PresentFenceFeaturesUnavailable;
+        }
+        var dbuf_features: PhysicalDeviceDescriptorBufferFeaturesEXT = .{ .sType = 1000316002, .pNext = if (windowed) &maintenance else null, .descriptorBuffer = TRUE };
+        var features13: PhysicalDeviceVulkan13Features = .{ .sType = 53, .pNext = if (self.descriptor_buffer) &dbuf_features else if (windowed) &maintenance else null, .dynamicRendering = TRUE, .synchronization2 = TRUE };
         var features12: PhysicalDeviceVulkan12Features = .{ .sType = 51, .pNext = &features13, .bufferDeviceAddress = TRUE };
         var features2: PhysicalDeviceFeatures2 = .{ .sType = 1000059000, .pNext = &features12 };
-        const device_extensions = [_][*:0]const u8{ "VK_EXT_descriptor_buffer", "VK_KHR_swapchain" };
+        var supported: PhysicalDeviceFeatures = undefined;
+        self.vk.vkGetPhysicalDeviceFeatures(physical, &supported);
+        // Optional capabilities used by the public API must be enabled, rather
+        // than merely queried from the physical device. Keep unrelated features off.
+        inline for (.{ "imageCubeArray", "independentBlend", "dualSrcBlend", "samplerAnisotropy", "textureCompressionETC2", "textureCompressionASTC_LDR", "textureCompressionBC", "shaderStorageImageExtendedFormats", "vertexPipelineStoresAndAtomics", "fragmentStoresAndAtomics" }) |feature| {
+            @field(features2.features, feature) = @field(supported, feature);
+        }
+
+        var device_extensions: [3][*:0]const u8 = undefined;
+        device_extensions[0] = "VK_KHR_swapchain";
+        var extension_count: u32 = 1;
+        if (self.descriptor_buffer) {
+            device_extensions[extension_count] = "VK_EXT_descriptor_buffer";
+            extension_count += 1;
+        }
+        if (windowed) {
+            device_extensions[extension_count] = "VK_EXT_swapchain_maintenance1";
+            extension_count += 1;
+        }
         const device_info: DeviceCreateInfo = .{
             .pNext = &features2,
             .queueCreateInfoCount = 1,
             .pQueueCreateInfos = @ptrCast(&queue_info),
-            .enabledExtensionCount = device_extensions.len,
+            .enabledExtensionCount = extension_count,
             .ppEnabledExtensionNames = &device_extensions,
         };
         if (self.vk.vkCreateDevice(physical, &device_info, null, &self.device) != SUCCESS) return error.VulkanInitFailed;
+        errdefer self.vk.vkDestroyDevice(self.device, null);
         self.queue = null;
         self.vk.vkGetDeviceQueue(self.device, family, 0, &self.queue);
         self.queue_family_index = family;
-        native_errors = 0;
+        if (comptime builtin.os.tag == .linux or builtin.os.tag == .windows) {
+            if (windowed) self.window = try Window.create(self.get_instance, self.instance, self.physical, self.device, self.queue, family);
+        }
         return self;
     }
 
     pub fn destroy(self: *Context) void {
         _ = self.vk.vkDeviceWaitIdle(self.device);
+        if (comptime builtin.os.tag == .linux or builtin.os.tag == .windows) {
+            if (self.window) |*window| window.deinit();
+        }
         self.vk.vkDestroyDevice(self.device, null);
         if (self.messenger != 0) self.vk.vkDestroyDebugUtilsMessengerEXT(self.instance, self.messenger, null);
         self.vk.vkDestroyInstance(self.instance, null);
@@ -239,6 +339,7 @@ pub const Context = struct {
             .device = @ptrCast(self.device.?),
             .queue = @ptrCast(self.queue.?),
             .queue_family_index = self.queue_family_index,
+            .use_descriptor_buffer = self.descriptor_buffer,
         } } };
     }
 
@@ -246,10 +347,22 @@ pub const Context = struct {
         return self.name;
     }
 
-    pub fn takeNativeErrors(_: *Context) u32 {
-        const count = native_errors;
-        native_errors = 0;
-        return count;
+    pub fn acquireSwapchain(self: *Context) !gpu.Swapchain {
+        if (comptime builtin.os.tag == .linux or builtin.os.tag == .windows) {
+            if (self.window) |*window| return window.acquire();
+        }
+        return error.NoWindow;
+    }
+
+    pub fn present(self: *Context, verify: bool) !void {
+        if (comptime builtin.os.tag == .linux or builtin.os.tag == .windows) {
+            if (self.window) |*window| return window.present(verify, self.physical);
+        }
+        return error.NoWindow;
+    }
+
+    pub fn takeNativeErrors(self: *Context) u32 {
+        return self.native_errors.swap(0, .acq_rel);
     }
 };
 
@@ -774,4 +887,13 @@ pub const PhysicalDeviceSparseProperties = extern struct {
     residencyStandard3DBlockShape: u32 = 0,
     residencyAlignedMipSize: u32 = 0,
     residencyNonResidentStrict: u32 = 0,
+};
+
+const ValidationFeatures = extern struct {
+    sType: u32 = 1000247000,
+    pNext: ?*const anyopaque = null,
+    enabledValidationFeatureCount: u32 = 0,
+    pEnabledValidationFeatures: ?[*]const u32 = null,
+    disabledValidationFeatureCount: u32 = 0,
+    pDisabledValidationFeatures: ?[*]const u32 = null,
 };

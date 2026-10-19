@@ -295,6 +295,8 @@ pub const State = struct {
     allocator: std.mem.Allocator,
     desc: t.Desc,
     frame_index: u32 = 1,
+    /// First native loss code. Host callbacks may set this from another thread.
+    loss_code: std.atomic.Value(i32) = .init(0),
     cur_pass: CurPass = .{},
     cur_pip: Ref(Pipeline) = .{},
     next_draw_valid: bool = false,
@@ -313,14 +315,43 @@ pub const State = struct {
     commit_listeners: []t.CommitListener,
     commit_listeners_upper: usize = 0,
     impl: backend.Impl = .dummy,
+    readbacks: std.ArrayList(*@import("readback_task.zig").Task) = .empty,
+    gl_loader: ?@import("backends/gl/win32_loader.zig").Loader = null,
 };
 
-/// The single global context, like the `_sg` struct of the original.
+/// The raw compatibility API retains a singleton; public Devices own their State.
 pub var sg: ?State = null;
+const Selection = if (@import("builtin").cpu.arch.isWasm()) struct {
+    var current: ?*State = null;
+} else struct {
+    threadlocal var current: ?*State = null;
+};
 
-pub fn state() *State {
+/// Scoped dispatch keeps the translated core/backend internals source-shaped.
+/// Selection is per thread and restored on return, including nested device calls.
+pub const Scope = struct {
+    previous: ?*State,
+    pub fn end(self: Scope) void {
+        Selection.current = self.previous;
+    }
+};
+pub fn enter(selected: *State) Scope {
+    const previous = Selection.current;
+    Selection.current = selected;
+    return .{ .previous = previous };
+}
+pub fn current() ?*State {
+    if (Selection.current) |s| return s;
     if (sg) |*s| return s;
-    @panic("sokol_gfx is not initialized");
+    return null;
+}
+pub fn state() *State {
+    return current() orelse @panic("zicr.gpu: no device selected");
+}
+
+/// Records the first device loss without allocating or invoking application code.
+pub fn recordLoss(code: i32) void {
+    _ = state().loss_code.cmpxchgStrong(0, if (code == 0) -1 else code, .acq_rel, .acquire);
 }
 
 // ---------------------------------------------------------------- logging and stats

@@ -6,6 +6,10 @@ pub const call_conv: std.builtin.CallingConvention = if (builtin.os.tag == .wind
 pub const GetProcAddress = *const fn (name: [:0]const u8, user_data: ?*anyopaque) ?*const anyopaque;
 
 pub const Dispatch = struct {
+    fenceSync: ?*const fn (u32, u32) callconv(call_conv) ?*anyopaque = null,
+    clientWaitSync: ?*const fn (?*anyopaque, u32, u64) callconv(call_conv) u32 = null,
+    deleteSync: ?*const fn (?*anyopaque) callconv(call_conv) void = null,
+    flush: ?*const fn () callconv(call_conv) void = null,
     invalidateFramebuffer: ?*const fn (u32, i32, ?[*]const u32) callconv(call_conv) void = null,
     bindVertexArray: ?*const fn (u32) callconv(call_conv) void = null,
     framebufferTextureLayer: ?*const fn (u32, u32, u32, i32, i32) callconv(call_conv) void = null,

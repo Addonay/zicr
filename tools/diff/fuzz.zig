@@ -341,7 +341,7 @@ const Fuzzer = struct {
         switch (@typeInfo(Z)) {
             .@"struct" => |info| inline for (info.field_names) |name| {
                 // backend-specific counters are not comparable with the dummy backend
-                if (comptime std.mem.eql(u8, name, "gl") or std.mem.eql(u8, name, "d3d11") or std.mem.eql(u8, name, "metal") or std.mem.eql(u8, name, "wgpu") or std.mem.eql(u8, name, "vk")) continue;
+                if (comptime std.mem.eql(u8, name, "gl") or std.mem.eql(u8, name, "d3d11") or std.mem.eql(u8, name, "d3d12") or std.mem.eql(u8, name, "metal") or std.mem.eql(u8, name, "wgpu") or std.mem.eql(u8, name, "vk")) continue;
                 compareFields(self, path ++ "." ++ name, @field(z, name), @field(cv, name));
             },
             else => if (z != cv) self.fail("stats {s}: {d} vs {d}", .{ path, z, cv }),

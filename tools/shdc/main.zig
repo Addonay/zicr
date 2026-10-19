@@ -55,7 +55,10 @@ const Parser = struct {
         }
         var parser: Parser = .{ .arena = arena, .lines = lines.items };
         if (parser.lines.len == 0) return .{ .map = &.{} };
-        return parser.block(parser.lines[0].indent);
+        if (parser.lines[0].indent != 0) return error.InvalidYaml;
+        const root = try parser.block(0);
+        if (parser.pos != parser.lines.len) return error.InvalidYaml;
+        return root;
     }
 
     fn block(self: *Parser, indent: usize) error{ OutOfMemory, InvalidYaml }!Node {
@@ -98,7 +101,88 @@ const Parser = struct {
     }
 };
 
+// WGSL 16.1/16.2, checked 2026-10-18: https://www.w3.org/TR/WGSL/#keyword-summary
+// Check reflection names before generating any module: shdc can preserve a GLSL
+// resource name which is reserved in WGSL and otherwise fail only at GPU submit.
+const wgsl_reserved =
+    "alias break case const const_assert continue continuing default diagnostic discard else enable false fn for if let loop override requires return struct switch true var while " ++
+    "NULL Self abstract active alignas alignof as asm asm_fragment async attribute auto await become cast catch class co_await co_return co_yield coherent column_major common compile compile_fragment concept const_cast consteval constexpr constinit crate debugger decltype delete demote demote_to_helper do dynamic_cast enum explicit export extends extern external fallthrough filter final finally friend from fxgroup get goto groupshared highp impl implements import inline instanceof interface layout lowp macro macro_rules match mediump meta mod module move mut mutable namespace new nil noexcept noinline nointerpolation non_coherent noncoherent noperspective null nullptr of operator package packoffset partition pass patch pixelfragment precise precision premerge priv protected pub public readonly ref regardless register reinterpret_cast require resource restrict self set shared sizeof smooth snorm static static_assert static_cast std subroutine super target template this thread_local throw trait try type typedef typeid typename typeof union unless unorm unsafe unsized use using varying virtual volatile wgsl where with writeonly yield";
+
+// Target-specific additions to WGSL's broad future-reserved set. HLSL object
+// keywords: https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/dx-graphics-hlsl-appendix-keywords
+// MSL/C++ additions: https://wgpu.rs/doc/src/naga/back/msl/keywords.rs.html
+const target_reserved =
+    "AppendStructuredBuffer BlendState Buffer ByteAddressBuffer cbuffer centroid CompileShader ComputeShader ConsumeStructuredBuffer DepthStencilState DepthStencilView DomainShader dword GeometryShader Hullshader InputPatch line lineadj linear LineStream matrix OutputPatch PixelShader point PointStream RasterizerState RenderTargetView row_major RWBuffer RWByteAddressBuffer RWStructuredBuffer RWTexture1D RWTexture1DArray RWTexture2D RWTexture2DArray RWTexture3D sample sampler SamplerState SamplerComparisonState stateblock stateblock_state string StructuredBuffer tbuffer technique technique10 technique11 texture Texture1D Texture1DArray Texture2D Texture2DArray Texture2DMS Texture2DMSArray Texture3D TextureCube TextureCubeArray triangle triangleadj TriangleStream uniform unsigned vector vertexfragment VertexShader void " ++
+    "and bitor or xor compl bitand and_eq or_eq xor_eq not not_eq char char16_t char32_t short signed wchar_t private main device constant thread threadgroup threadgroup_imageblock ray_data object_data vertex fragment kernel metal atomic as_type size_t ptrdiff_t uchar ushort uint ulong half bfloat";
+
+fn reservedIdentifier(name: []const u8) bool {
+    if (std.mem.startsWith(u8, name, "__") or std.mem.eql(u8, name, "_")) return true;
+    inline for (.{ wgsl_reserved, target_reserved }) |set| {
+        var words = std.mem.tokenizeScalar(u8, set, ' ');
+        while (words.next()) |word| if (std.mem.eql(u8, word, name)) return true;
+    }
+    // Numeric vector/matrix type keywords are a family, not just scalar names.
+    inline for (.{ "bool", "int", "uint", "float", "double", "half", "min10float", "min16float", "min12int", "min16int", "min16uint", "char", "short", "long", "uchar", "ushort", "ulong", "bfloat" }) |scalar| {
+        if (std.mem.eql(u8, name, scalar)) return true;
+        if (std.mem.startsWith(u8, name, scalar)) {
+            const suffix = name[scalar.len..];
+            if (suffix.len == 1 and suffix[0] >= '1' and suffix[0] <= '4') return true;
+            if (suffix.len == 3 and suffix[0] >= '1' and suffix[0] <= '4' and suffix[1] == 'x' and suffix[2] >= '1' and suffix[2] <= '4') return true;
+        }
+    }
+    return false;
+}
+
+fn validateIdentifiers(node: Node) error{ReservedShaderIdentifier}!void {
+    switch (node) {
+        .scalar => {},
+        .list => |items| for (items) |item| try validateIdentifiers(item),
+        .map => |entries| for (entries) |entry| {
+            const identifier = std.mem.eql(u8, entry.key, "name") or std.mem.eql(u8, entry.key, "struct_name") or std.mem.eql(u8, entry.key, "inst_name") or std.mem.eql(u8, entry.key, "glsl_name");
+            if (identifier and entry.value == .scalar and reservedIdentifier(entry.value.scalar)) {
+                if (!@import("builtin").is_test) std.debug.print("shader identifier '{s}' is reserved in a shader target language; rename it in the input shader\n", .{entry.value.scalar});
+                return error.ReservedShaderIdentifier;
+            }
+            try validateIdentifiers(entry.value);
+        },
+    }
+}
+
 // ---------------------------------------------------------------- code generation
+
+/// Convert shdc's GL 4.10 interface decorations to the GL 3.30 interface.
+/// This deliberately does not translate newer language operations: the native
+/// compiler still rejects unsupported shader syntax. Compute remains GL 4.30.
+fn gl330Source(allocator: Allocator, source: []const u8, vertex: bool) ![]const u8 {
+    if (!std.mem.startsWith(u8, source, "#version 410\n")) return error.UnexpectedGlslVersion;
+    var result: std.ArrayList(u8) = .empty;
+    errdefer result.deinit(allocator);
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    while (lines.next()) |original| {
+        var line = original;
+        if (std.mem.eql(u8, line, "#version 410")) line = "#version 330";
+        // Vertex inputs and fragment outputs retain GL 3.3 attribute locations.
+        // Interstage varyings link by their original names instead of locations.
+        if (std.mem.startsWith(u8, line, "layout(location = ")) {
+            const end = std.mem.indexOfScalar(u8, line, ')') orelse return error.InvalidShaderInterface;
+            const declaration = std.mem.trimStart(u8, line[end + 1 ..], " ");
+            var qualifiers = std.mem.tokenizeAny(u8, declaration, " \t");
+            while (qualifiers.next()) |qualifier| {
+                if (std.mem.eql(u8, qualifier, if (vertex) "out" else "in")) {
+                    // Do not silently discard extra component/index decorations.
+                    const location = std.mem.trim(u8, line["layout(location = ".len..end], " ");
+                    _ = std.fmt.parseInt(u32, location, 10) catch return error.UnsupportedShaderInterface;
+                    line = declaration;
+                    break;
+                }
+                if (!std.mem.eql(u8, qualifier, "flat") and !std.mem.eql(u8, qualifier, "smooth") and !std.mem.eql(u8, qualifier, "noperspective") and !std.mem.eql(u8, qualifier, "centroid") and !std.mem.eql(u8, qualifier, "sample") and !std.mem.eql(u8, qualifier, "invariant")) break;
+            }
+        }
+        try result.appendSlice(allocator, line);
+        try result.append(allocator, '\n');
+    }
+    return try result.toOwnedSlice(allocator);
+}
 
 const Generator = struct {
     arena: Allocator,
@@ -106,6 +190,7 @@ const Generator = struct {
     out: *Io.Writer,
     /// Directory containing the reflection file, for relative shader paths.
     base_dir: []const u8,
+    legacy_gl: bool = false,
     blob_index: usize = 0,
     blobs: std.ArrayList(u8) = .empty,
 
@@ -116,9 +201,10 @@ const Generator = struct {
         return cwd.readFileAlloc(self.io, joined, self.arena, .unlimited);
     }
 
-    fn function(self: *Generator, func: Node) !void {
+    fn function(self: *Generator, func: Node, vertex: bool) !void {
         const w = self.out;
-        const data = try self.readShaderFile(func.str("path") orelse return error.MissingShaderPath);
+        const original = try self.readShaderFile(func.str("path") orelse return error.MissingShaderPath);
+        const data = if (self.legacy_gl) try gl330Source(self.arena, original, vertex) else original;
         const binary = std.mem.eql(u8, func.str("is_binary") orelse "false", "true");
         try w.writeAll(".{ .code = .{ ");
         if (binary) {
@@ -160,16 +246,16 @@ const Generator = struct {
         try w.writeAll(".{\n        .stages = ");
         if (program.get("compute_func")) |cs| {
             try w.writeAll(".{ .compute = .{ .function = ");
-            try self.function(cs);
+            try self.function(cs, false);
             if (program.get("mtl_threads_per_threadgroup")) |tg| {
                 try w.print(", .threads_per_threadgroup = .{{ {d}, {d}, {d} }}", .{ tg.int("x") orelse 1, tg.int("y") orelse 1, tg.int("z") orelse 1 });
             }
             try w.writeAll(" } },\n");
         } else {
             try w.writeAll(".{ .render = .{ .vertex = ");
-            try self.function(program.get("vertex_func") orelse return error.MissingVertexFunction);
+            try self.function(program.get("vertex_func") orelse return error.MissingVertexFunction, true);
             try w.writeAll(", .fragment = ");
-            try self.function(program.get("fragment_func") orelse return error.MissingFragmentFunction);
+            try self.function(program.get("fragment_func") orelse return error.MissingFragmentFunction, false);
             try w.writeAll(" } },\n");
         }
 
@@ -351,6 +437,13 @@ fn generate(gen: *Generator, root: Node, input_name: []const u8) !void {
             try w.print("    const {s}: gpu.ShaderDesc = ", .{slang});
             try gen.desc(program);
             try w.writeAll(";\n");
+            if (std.mem.eql(u8, slang, "glsl410")) {
+                gen.legacy_gl = true;
+                try w.writeAll("    /// GLSL 3.30 variant; actual shader syntax must be supported by GL 3.3.\n    pub const glsl330: gpu.ShaderDesc = ");
+                try gen.desc(program);
+                try w.writeAll(";\n");
+                gen.legacy_gl = false;
+            }
         }
 
         // backend selection
@@ -400,8 +493,68 @@ pub fn main(init: std.process.Init) !void {
     const reflection_path = try std.fmt.allocPrint(arena, "{s}_reflection.yaml", .{prefix});
     const yaml = try cwd.readFileAlloc(io, reflection_path, arena, .unlimited);
     const root = try Parser.parse(arena, yaml);
+    try validateIdentifiers(root);
     var out: Io.Writer.Allocating = .init(arena);
     var gen: Generator = .{ .arena = arena, .io = io, .out = &out.writer, .base_dir = scratch };
     try generate(&gen, root, std.fs.path.basename(input));
     try cwd.writeFile(io, .{ .sub_path = output, .data = out.written() });
+}
+
+test "pinned reflection subset preserves nested resources and trailing semicolons" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const root = try Parser.parse(arena.allocator(),
+        \\shaders:
+        \\  -
+        \\    slang: wgsl
+        \\    programs:
+        \\      -
+        \\        name: textured
+        \\        views:
+        \\          -
+        \\            texture:
+        \\              name: source_image
+        \\              slot: 3;
+    );
+    const program = findProgram(root.items("shaders"), "wgsl", "textured").?;
+    const texture = program.items("views")[0].get("texture").?;
+    try std.testing.expectEqualStrings("source_image", texture.str("name").?);
+    try std.testing.expectEqual(@as(u32, 3), texture.int("slot").?);
+}
+
+test "reflection parser rejects unconsumed or malformed indentation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.InvalidYaml, Parser.parse(arena.allocator(), "  shaders: bad"));
+    try std.testing.expectError(error.InvalidYaml, Parser.parse(arena.allocator(), "shaders: scalar\n  unexpected: nested"));
+    try std.testing.expectError(error.InvalidYaml, Parser.parse(arena.allocator(), "missing colon"));
+}
+
+test "cross-target reserved reflection identifiers fail before GPU creation" {
+    inline for (.{ "target", "Texture2D", "cbuffer", "threadgroup", "device", "float4x4", "half3", "and_eq" }) |name| try std.testing.expect(reservedIdentifier(name));
+    try std.testing.expect(reservedIdentifier("__private"));
+    try std.testing.expect(reservedIdentifier("thread_local"));
+    try std.testing.expect(!reservedIdentifier("dst_image"));
+    try std.testing.expect(!reservedIdentifier("target_color"));
+    const invalid: Node = .{ .map = &.{.{ .key = "name", .value = .{ .scalar = "target" } }} };
+    try std.testing.expectError(error.ReservedShaderIdentifier, validateIdentifiers(invalid));
+    // Type descriptions and file paths are not user identifiers.
+    try validateIdentifiers(.{ .map = &.{.{ .key = "type", .value = .{ .scalar = "struct" } }} });
+}
+
+test "GL330 interface conversion keeps attribute and output locations" {
+    const input = "#version 410\nlayout(location = 0) in vec3 position;\nlayout(location = 1) out vec4 color;\n";
+    const vertex = try gl330Source(std.testing.allocator, input, true);
+    defer std.testing.allocator.free(vertex);
+    try std.testing.expect(std.mem.startsWith(u8, vertex, "#version 330\nlayout(location = 0) in"));
+    try std.testing.expect(std.mem.indexOf(u8, vertex, "\nout vec4 color;") != null);
+    const fragment = try gl330Source(std.testing.allocator, input, false);
+    defer std.testing.allocator.free(fragment);
+    try std.testing.expect(std.mem.indexOf(u8, fragment, "\nin vec3 position;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, fragment, "layout(location = 1) out") != null);
+    try std.testing.expectError(error.UnexpectedGlslVersion, gl330Source(std.testing.allocator, "#version 430\n", true));
+    const flat = try gl330Source(std.testing.allocator, "#version 410\nlayout(location = 0) flat out ivec4 value;\n", true);
+    defer std.testing.allocator.free(flat);
+    try std.testing.expect(std.mem.indexOf(u8, flat, "\nflat out ivec4 value;") != null);
+    try std.testing.expectError(error.UnsupportedShaderInterface, gl330Source(std.testing.allocator, "#version 410\nlayout(location = 0, component = 1) out vec2 value;\n", true));
 }

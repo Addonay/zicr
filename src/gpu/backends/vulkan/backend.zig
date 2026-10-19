@@ -2,6 +2,7 @@
 //! sokol_gfx.h:20694-24132. Uses dynamic rendering, synchronization2 and the
 //! VK_EXT_descriptor_buffer extension; all entry points are loaded at runtime.
 const std = @import("std");
+const observe = @import("result.zig").observe;
 const t = @import("../../types.zig");
 const e = @import("../../enums.zig");
 const core = @import("../../core.zig");
@@ -13,6 +14,9 @@ const convert = @import("convert.zig");
 const formats = @import("../../formats.zig");
 const memory = @import("memory.zig");
 const res = @import("resources.zig");
+
+const cache = @import("pipeline_cache.zig");
+const sets = @import("descriptor_sets.zig");
 
 const num_inflight = c.num_inflight_frames;
 const max_ub_slots = c.max_uniformblock_bindslots;
@@ -37,6 +41,7 @@ const Frame = struct {
         command_buffer: sdk.CommandBuffer = null,
         stream_command_buffer: sdk.CommandBuffer = null,
         delete_queue: memory.DeleteQueue = .{},
+        uploads: memory.UploadArena = .{},
     };
 };
 
@@ -44,8 +49,6 @@ const CopyStaging = struct {
     cmd_pool: u64 = 0,
     cmd_buf: sdk.CommandBuffer = null,
     size: u32 = 0,
-    buf: u64 = 0,
-    mem: u64 = 0,
 };
 
 const Stage = struct {
@@ -64,6 +67,13 @@ const Uniforms = struct {
 
 pub const Backend = struct {
     allocator: std.mem.Allocator,
+    use_descriptor_buffer: bool = false,
+    descriptor_set_capacity: u32 = 4096,
+    pipeline_cache: sdk.PipelineCache = 0,
+    descriptor_sets_used: u32 = 0,
+    delete_queue_budget: usize = 0,
+    descriptor_pools: [num_inflight]sdk.DescriptorPool = @splat(0),
+    uniform_buffer_infos: [max_ub_slots]sdk.DescriptorBufferInfo = std.mem.zeroes([max_ub_slots]sdk.DescriptorBufferInfo),
     fns: sdk.Dispatch = .{},
     instance: sdk.Instance = null,
     phys_dev: sdk.PhysicalDevice = null,
@@ -103,6 +113,8 @@ pub const Backend = struct {
 
         var self: Backend = .{
             .allocator = s.allocator,
+            .use_descriptor_buffer = desc.vulkan.use_descriptor_buffer,
+            .descriptor_set_capacity = desc.vulkan.descriptor_set_capacity,
             .instance = @constCast(instance),
             .phys_dev = @constCast(phys_dev),
             .dev = @constCast(device),
@@ -111,8 +123,8 @@ pub const Backend = struct {
         };
         self.fns.load(get_instance, self.instance, self.dev) catch return error.VulkanInitFailed;
         const d = &self.fns.device;
-        if (d.vkGetDescriptorSetLayoutSizeEXT == null or d.vkGetDescriptorSetLayoutBindingOffsetEXT == null or
-            d.vkGetDescriptorEXT == null or d.vkCmdBindDescriptorBuffersEXT == null or d.vkCmdSetDescriptorBufferOffsetsEXT == null)
+        if (self.use_descriptor_buffer and (d.vkGetDescriptorSetLayoutSizeEXT == null or d.vkGetDescriptorSetLayoutBindingOffsetEXT == null or
+            d.vkGetDescriptorEXT == null or d.vkCmdBindDescriptorBuffersEXT == null or d.vkCmdSetDescriptorBufferOffsetsEXT == null))
         {
             return error.MissingVulkanExtension;
         }
@@ -123,6 +135,8 @@ pub const Backend = struct {
         errdefer self.track_images.deinit(s.allocator);
 
         self.initCaps(s);
+        try cache.init(&self, desc.vulkan.pipeline_cache_data);
+        errdefer cache.deinit(&self);
         // each cleanup is registered before its step, since the discard
         // functions accept partially created (null) objects
         errdefer self.destroyFences();
@@ -136,6 +150,8 @@ pub const Backend = struct {
         errdefer memory.uniformDiscard(&self);
         try memory.uniformInit(&self, desc);
         memory.bindInit(&self, desc);
+        if (!self.use_descriptor_buffer) try sets.init(&self, self.descriptor_set_capacity);
+        errdefer if (!self.use_descriptor_buffer) sets.deinit(&self);
         errdefer memory.bindDiscard(&self);
         errdefer memory.destroyDeleteQueues(&self);
         try memory.createDeleteQueues(&self, desc);
@@ -144,9 +160,13 @@ pub const Backend = struct {
 
     /// Waits for the device and destroys all backend objects (_sg_vk_discard_backend).
     pub fn deinit(self: *Backend) void {
-        _ = self.fns.device.vkDeviceWaitIdle(self.dev);
+        const idle = observe(self.fns.device.vkDeviceWaitIdle(self.dev));
+        if (idle != sdk.SUCCESS and idle != -4) std.debug.panic("Vulkan idle wait failed ({d}); GPU completion is unproven", .{idle});
+        for (&self.frame.slots) |*slot| slot.uploads.deinit(self);
+        cache.deinit(self);
         memory.destroyDeleteQueues(self);
         memory.bindDiscard(self);
+        if (!self.use_descriptor_buffer) sets.deinit(self);
         memory.uniformDiscard(self);
         memory.sharedBufferDiscard(self, &self.stage.stream);
         memory.stagingCopyDiscard(self);
@@ -163,25 +183,25 @@ pub const Backend = struct {
     fn initCaps(self: *Backend, s: *core.State) void {
         const d = &self.fns;
         s.features.origin_top_left = true;
-        s.features.image_clamp_to_border = false; // FIXME?
-        s.features.mrt_independent_blend_state = true;
-        s.features.mrt_independent_write_mask = true;
+        s.features.image_clamp_to_border = true;
         s.features.compute = true;
         s.features.msaa_texture_bindings = true;
         s.features.draw_base_vertex = true;
         s.features.draw_base_instance = true;
-        s.features.dual_source_blending = true;
         s.features.vertexformat_int10_n2 = true;
         s.features.copy_buffer_to_image_relaxed_buffer_type = true;
         s.features.copy_buffer_to_image_relaxed_bytes_per_row = true;
 
         self.descriptor_buffer_props.sType = sdk.STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_BUFFER_PROPERTIES_EXT;
         self.dev_props.sType = sdk.STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-        self.dev_props.pNext = &self.descriptor_buffer_props;
+        self.dev_props.pNext = if (self.use_descriptor_buffer) &self.descriptor_buffer_props else null;
         d.instance.vkGetPhysicalDeviceProperties2(self.phys_dev, &self.dev_props);
         self.dev_props.pNext = null;
         self.dev_features.sType = sdk.STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
         d.instance.vkGetPhysicalDeviceFeatures2(self.phys_dev, &self.dev_features);
+        s.features.mrt_independent_blend_state = self.dev_features.features.independentBlend != 0;
+        s.features.mrt_independent_write_mask = self.dev_features.features.independentBlend != 0;
+        s.features.dual_source_blending = self.dev_features.features.dualSrcBlend != 0;
 
         const l = &self.dev_props.properties.limits;
         s.limits.max_image_size_2d = @intCast(l.maxImageDimension2D);
@@ -221,7 +241,7 @@ pub const Backend = struct {
                 // query msaa support
                 fmt_info.format = vkfmt;
                 fmt_info.usage = if (info.depth) sdk.IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT else sdk.IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-                if (d.instance.vkGetPhysicalDeviceImageFormatProperties2(self.phys_dev, &fmt_info, &props2) == sdk.SUCCESS) {
+                if (observe(d.instance.vkGetPhysicalDeviceImageFormatProperties2(self.phys_dev, &fmt_info, &props2)) == sdk.SUCCESS) {
                     info.msaa = props2.imageFormatProperties.sampleCounts > sdk.SAMPLE_COUNT_1_BIT;
                 }
             }
@@ -235,7 +255,7 @@ pub const Backend = struct {
             .flags = sdk.FENCE_CREATE_SIGNALED_BIT,
         };
         for (&self.frame.slots) |*slot| {
-            if (self.fns.device.vkCreateFence(self.dev, &create_info, null, &slot.fence) != sdk.SUCCESS) return error.VulkanInitFailed;
+            if (observe(self.fns.device.vkCreateFence(self.dev, &create_info, null, &slot.fence)) != sdk.SUCCESS) return error.VulkanInitFailed;
         }
     }
 
@@ -253,7 +273,7 @@ pub const Backend = struct {
             .flags = sdk.COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT,
             .queueFamilyIndex = self.queue_family_index,
         };
-        if (self.fns.device.vkCreateCommandPool(self.dev, &pool_info, null, &self.frame.cmd_pool) != sdk.SUCCESS) return error.VulkanInitFailed;
+        if (observe(self.fns.device.vkCreateCommandPool(self.dev, &pool_info, null, &self.frame.cmd_pool)) != sdk.SUCCESS) return error.VulkanInitFailed;
         for (&self.frame.slots) |*slot| {
             const alloc_info: sdk.CommandBufferAllocateInfo = .{
                 .sType = sdk.STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
@@ -262,8 +282,8 @@ pub const Backend = struct {
                 .level = sdk.COMMAND_BUFFER_LEVEL_PRIMARY,
                 .commandBufferCount = 1,
             };
-            if (self.fns.device.vkAllocateCommandBuffers(self.dev, &alloc_info, &slot.command_buffer) != sdk.SUCCESS) return error.VulkanInitFailed;
-            if (self.fns.device.vkAllocateCommandBuffers(self.dev, &alloc_info, &slot.stream_command_buffer) != sdk.SUCCESS) return error.VulkanInitFailed;
+            if (observe(self.fns.device.vkAllocateCommandBuffers(self.dev, &alloc_info, &slot.command_buffer)) != sdk.SUCCESS) return error.VulkanInitFailed;
+            if (observe(self.fns.device.vkAllocateCommandBuffers(self.dev, &alloc_info, &slot.stream_command_buffer)) != sdk.SUCCESS) return error.VulkanInitFailed;
         }
     }
 
@@ -286,21 +306,23 @@ pub const Backend = struct {
         // block until the oldest inflight frame has finished
         var r: i32 = undefined;
         while (true) {
-            r = d.vkWaitForFences(self.dev, 1, @ptrCast(&slot.fence), sdk.TRUE, std.math.maxInt(u64));
+            r = observe(d.vkWaitForFences(self.dev, 1, @ptrCast(&slot.fence), sdk.TRUE, std.math.maxInt(u64)));
             if (r != sdk.TIMEOUT) break;
         }
         if (r != sdk.SUCCESS) {
+            if (r == -4) core.recordLoss(r);
             core.logWarn(.vulkan_wait_for_fence_failed);
             core.state().cur_pass.valid = false;
             return;
         }
-        _ = d.vkResetFences(self.dev, 1, @ptrCast(&slot.fence));
+        _ = observe(d.vkResetFences(self.dev, 1, @ptrCast(&slot.fence)));
         memory.deleteQueueCollect(self);
+        slot.uploads.reset(self);
 
         self.frame.cmd_buf = slot.command_buffer;
-        _ = d.vkResetCommandBuffer(self.frame.cmd_buf, 0);
+        _ = observe(d.vkResetCommandBuffer(self.frame.cmd_buf, 0));
         self.frame.stream_cmd_buf = slot.stream_command_buffer;
-        _ = d.vkResetCommandBuffer(self.frame.stream_cmd_buf, 0);
+        _ = observe(d.vkResetCommandBuffer(self.frame.stream_cmd_buf, 0));
 
         const begin_info: sdk.CommandBufferBeginInfo = .{
             .sType = sdk.STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -308,12 +330,19 @@ pub const Backend = struct {
             .flags = sdk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
             .pInheritanceInfo = null,
         };
-        _ = d.vkBeginCommandBuffer(self.frame.cmd_buf, &begin_info);
-        _ = d.vkBeginCommandBuffer(self.frame.stream_cmd_buf, &begin_info);
+        _ = observe(d.vkBeginCommandBuffer(self.frame.cmd_buf, &begin_info));
+        _ = observe(d.vkBeginCommandBuffer(self.frame.stream_cmd_buf, &begin_info));
 
         memory.uniformAfterAcquire(self);
         memory.bindAfterAcquire(self);
         memory.sharedBufferAfterAcquire(self, &self.stage.stream);
+    }
+
+    /// Initial/unsealed uploads run before rendering; those resources cannot be
+    /// consumed by a draw until initialized/sealed. Arena bytes live to the fence.
+    pub fn uploadCommands(self: *Backend) sdk.CommandBuffer {
+        self.acquireFrameCommandBuffers();
+        return self.frame.stream_cmd_buf;
     }
 
     fn submitFrameCommandBuffers(self: *Backend) void {
@@ -323,8 +352,8 @@ pub const Backend = struct {
         memory.bindBeforeSubmit(self);
         memory.uniformBeforeSubmit(self);
 
-        _ = d.vkEndCommandBuffer(self.frame.stream_cmd_buf);
-        _ = d.vkEndCommandBuffer(self.frame.cmd_buf);
+        _ = observe(d.vkEndCommandBuffer(self.frame.stream_cmd_buf));
+        _ = observe(d.vkEndCommandBuffer(self.frame.cmd_buf));
 
         var stream_cmd = self.frame.stream_cmd_buf;
         var cmd = self.frame.cmd_buf;
@@ -349,7 +378,9 @@ pub const Backend = struct {
         }
         submit_infos[1].commandBufferCount = 1;
         submit_infos[1].pCommandBuffers = @ptrCast(&cmd);
-        _ = d.vkQueueSubmit(self.queue, 2, &submit_infos, self.frame.slots[self.frame_slot].fence);
+        core.statsInc("vk.num_queue_submits");
+        const result = observe(d.vkQueueSubmit(self.queue, 2, &submit_infos, self.frame.slots[self.frame_slot].fence));
+        if (result == -4) core.recordLoss(result);
 
         self.frame.cmd_buf = null;
         self.frame.stream_cmd_buf = null;
@@ -360,6 +391,7 @@ pub const Backend = struct {
     // ------------------------------------------------------------ resources
 
     pub fn createBuffer(self: *Backend, buf: *core.Buffer, desc: *const t.BufferDesc) e.ResourceState {
+        if (!memory.reserveDeleteQueue(self)) return .failed;
         const d = &self.fns.device;
         buf.native = .{ .vulkan = .{} };
         const payload = &buf.native.vulkan;
@@ -376,14 +408,14 @@ pub const Backend = struct {
             .queueFamilyIndexCount = 0,
             .pQueueFamilyIndices = null,
         };
-        if (d.vkCreateBuffer(self.dev, &create_info, null, &payload.buf) != sdk.SUCCESS) {
+        if (observe(d.vkCreateBuffer(self.dev, &create_info, null, &payload.buf)) != sdk.SUCCESS) {
             core.logError(.vulkan_create_buffer_failed);
             return .failed;
         }
         std.debug.assert(payload.buf != 0);
         memory.setObjectLabel(self, sdk.OBJECT_TYPE_BUFFER, payload.buf, desc.label);
         if (!memory.allocBufferDeviceMemory(self, buf)) return .failed;
-        if (d.vkBindBufferMemory(self.dev, payload.buf, payload.mem, 0) != sdk.SUCCESS) {
+        if (observe(d.vkBindBufferMemory(self.dev, payload.buf, payload.mem, 0)) != sdk.SUCCESS) {
             core.logError(.vulkan_bind_buffer_memory_failed);
             return .failed;
         }
@@ -397,7 +429,7 @@ pub const Backend = struct {
             std.debug.assert(payload.dev_addr != 0);
         }
         if (desc.data.ptr != null) {
-            memory.stagingCopyBufferData(self, buf, &desc.data, 0, 0, desc.data.size, false);
+            if (!memory.stagingCopyBufferData(self, buf, &desc.data, 0, 0, desc.data.size)) return .failed;
         }
         return .valid;
     }
@@ -417,6 +449,7 @@ pub const Backend = struct {
     }
 
     pub fn createImage(self: *Backend, img: *core.Image, desc: *const t.ImageDesc) e.ResourceState {
+        if (!memory.reserveDeleteQueue(self)) return .failed;
         const d = &self.fns.device;
         img.native = .{ .vulkan = .{} };
         const payload = &img.native.vulkan;
@@ -443,19 +476,19 @@ pub const Backend = struct {
             .pQueueFamilyIndices = null,
             .initialLayout = sdk.IMAGE_LAYOUT_UNDEFINED,
         };
-        if (d.vkCreateImage(self.dev, &create_info, null, &payload.img) != sdk.SUCCESS) {
+        if (observe(d.vkCreateImage(self.dev, &create_info, null, &payload.img)) != sdk.SUCCESS) {
             core.logError(.vulkan_create_image_failed);
             return .failed;
         }
         std.debug.assert(payload.img != 0);
         memory.setObjectLabel(self, sdk.OBJECT_TYPE_IMAGE, payload.img, desc.label);
         if (!memory.allocImageDeviceMemory(self, img)) return .failed;
-        if (d.vkBindImageMemory(self.dev, payload.img, payload.mem, 0) != sdk.SUCCESS) {
+        if (observe(d.vkBindImageMemory(self.dev, payload.img, payload.mem, 0)) != sdk.SUCCESS) {
             core.logError(.vulkan_bind_image_memory_failed);
             return .failed;
         }
         if (desc.data.mip_levels[0].ptr != null) {
-            memory.stagingCopyImageData(self, img, &desc.data, false);
+            if (!memory.stagingCopyImageData(self, img, &desc.data)) return .failed;
         }
         return .valid;
     }
@@ -475,8 +508,13 @@ pub const Backend = struct {
     }
 
     pub fn createSampler(self: *Backend, smp: *core.Sampler, desc: *const t.SamplerDesc) e.ResourceState {
+        if (!memory.reserveDeleteQueue(self)) return .failed;
         smp.native = .{ .vulkan = .{} };
         const payload = &smp.native.vulkan;
+        const anisotropy: f32 = if (self.dev_features.features.samplerAnisotropy != 0)
+            @min(@as(f32, @floatFromInt(desc.max_anisotropy)), self.dev_props.properties.limits.maxSamplerAnisotropy)
+        else
+            1;
         const create_info: sdk.SamplerCreateInfo = .{
             .sType = sdk.STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
             .pNext = null,
@@ -488,8 +526,8 @@ pub const Backend = struct {
             .addressModeV = convert.samplerAddressMode(desc.wrap_v),
             .addressModeW = convert.samplerAddressMode(desc.wrap_w),
             .mipLodBias = 0.0,
-            .anisotropyEnable = if (desc.max_anisotropy > 1) sdk.TRUE else sdk.FALSE,
-            .maxAnisotropy = @floatFromInt(desc.max_anisotropy),
+            .anisotropyEnable = if (anisotropy > 1) sdk.TRUE else sdk.FALSE,
+            .maxAnisotropy = anisotropy,
             .compareEnable = if (desc.compare != .never) sdk.TRUE else sdk.FALSE,
             .compareOp = if (desc.compare != .never) convert.compareOp(desc.compare) else sdk.COMPARE_OP_NEVER,
             .minLod = desc.min_lod,
@@ -497,13 +535,14 @@ pub const Backend = struct {
             .borderColor = convert.samplerBorderColor(desc.border_color),
             .unnormalizedCoordinates = sdk.FALSE,
         };
-        if (self.fns.device.vkCreateSampler(self.dev, &create_info, null, &payload.smp) != sdk.SUCCESS) {
+        if (observe(self.fns.device.vkCreateSampler(self.dev, &create_info, null, &payload.smp)) != sdk.SUCCESS) {
             core.logError(.vulkan_create_sampler_failed);
             return .failed;
         }
         std.debug.assert(payload.smp != 0);
         memory.setObjectLabel(self, sdk.OBJECT_TYPE_SAMPLER, payload.smp, desc.label);
 
+        if (!self.use_descriptor_buffer) return .valid;
         // record sampler descriptor data
         payload.descriptor_size = @intCast(self.descriptor_buffer_props.samplerDescriptorSize);
         if (res.max_descriptor_data_size < payload.descriptor_size) {
@@ -555,7 +594,7 @@ pub const Backend = struct {
         };
         defer if (!aligned) self.allocator.free(words);
         create_info.pCode = if (aligned) @ptrCast(@alignCast(func.bytecode.ptr.?)) else @ptrCast(words.ptr);
-        if (self.fns.device.vkCreateShaderModule(self.dev, &create_info, null, &vk_func.module) != sdk.SUCCESS) {
+        if (observe(self.fns.device.vkCreateShaderModule(self.dev, &create_info, null, &vk_func.module)) != sdk.SUCCESS) {
             core.logError(.vulkan_create_shader_module_failed);
         } else {
             std.debug.assert(vk_func.module != 0);
@@ -602,6 +641,7 @@ pub const Backend = struct {
     }
 
     pub fn createShader(self: *Backend, shd: *core.Shader, desc: *const t.ShaderDesc) e.ResourceState {
+        if (!memory.reserveDeleteQueue(self)) return .failed;
         shd.native = .{ .vulkan = .{} };
         const payload = &shd.native.vulkan;
         if (!ensureSpirvBindslotRanges(desc)) return .failed;
@@ -642,29 +682,32 @@ pub const Backend = struct {
             };
             dsl_index += 1;
         }
+        payload.ub_count = @intCast(dsl_index);
         var dsl_create_info: sdk.DescriptorSetLayoutCreateInfo = .{
             .sType = sdk.STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             .pNext = null,
-            .flags = sdk.DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT,
+            .flags = if (self.use_descriptor_buffer) sdk.DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT else 0,
             .bindingCount = @intCast(dsl_index),
             .pBindings = &dsl_entries[0],
         };
-        if (self.fns.device.vkCreateDescriptorSetLayout(self.dev, &dsl_create_info, null, &payload.ub_dsl) != sdk.SUCCESS) {
+        if (observe(self.fns.device.vkCreateDescriptorSetLayout(self.dev, &dsl_create_info, null, &payload.ub_dsl)) != sdk.SUCCESS) {
             core.logError(.vulkan_create_descriptor_set_layout_failed);
             return .failed;
         }
 
-        // store uniform descriptor set size and descriptor offsets
-        self.fns.device.vkGetDescriptorSetLayoutSizeEXT.?(self.dev, payload.ub_dsl, &payload.ub_dset_size);
-        if (payload.ub_dset_size > self.uniforms.dset_cache_size) {
-            core.logError(.vulkan_shader_uniform_descriptor_set_size_vs_cache_size);
-            return .failed;
-        }
-        for (0..max_ub_slots) |i| {
-            if (shd.cmn.uniform_blocks[i].stage == .none) continue;
-            var dset_offset: u64 = 0;
-            self.fns.device.vkGetDescriptorSetLayoutBindingOffsetEXT.?(self.dev, payload.ub_dsl, payload.ub_set0_bnd_n[i], &dset_offset);
-            payload.ub_dset_offsets[i] = @intCast(dset_offset);
+        if (self.use_descriptor_buffer) {
+            // store uniform descriptor set size and descriptor offsets
+            self.fns.device.vkGetDescriptorSetLayoutSizeEXT.?(self.dev, payload.ub_dsl, &payload.ub_dset_size);
+            if (payload.ub_dset_size > self.uniforms.dset_cache_size) {
+                core.logError(.vulkan_shader_uniform_descriptor_set_size_vs_cache_size);
+                return .failed;
+            }
+            for (0..max_ub_slots) |i| {
+                if (shd.cmn.uniform_blocks[i].stage == .none) continue;
+                var dset_offset: u64 = 0;
+                self.fns.device.vkGetDescriptorSetLayoutBindingOffsetEXT.?(self.dev, payload.ub_dsl, payload.ub_set0_bnd_n[i], &dset_offset);
+                payload.ub_dset_offsets[i] = @intCast(dset_offset);
+            }
         }
 
         dsl_index = 0;
@@ -705,26 +748,29 @@ pub const Backend = struct {
             };
             dsl_index += 1;
         }
+        payload.view_smp_count = @intCast(dsl_index);
         dsl_create_info.bindingCount = @intCast(dsl_index);
         dsl_create_info.pBindings = &dsl_entries[0];
-        if (self.fns.device.vkCreateDescriptorSetLayout(self.dev, &dsl_create_info, null, &payload.view_smp_dsl) != sdk.SUCCESS) {
+        if (observe(self.fns.device.vkCreateDescriptorSetLayout(self.dev, &dsl_create_info, null, &payload.view_smp_dsl)) != sdk.SUCCESS) {
             core.logError(.vulkan_create_descriptor_set_layout_failed);
             return .failed;
         }
 
-        // store view/smp descriptor set size and descriptor offsets
-        self.fns.device.vkGetDescriptorSetLayoutSizeEXT.?(self.dev, payload.view_smp_dsl, &payload.view_smp_dset_size);
-        for (0..max_view_slots) |i| {
-            if (shd.cmn.views[i].stage == .none) continue;
-            var dset_offset: u64 = 0;
-            self.fns.device.vkGetDescriptorSetLayoutBindingOffsetEXT.?(self.dev, payload.view_smp_dsl, payload.view_set1_bnd_n[i], &dset_offset);
-            payload.view_dset_offsets[i] = @intCast(dset_offset);
-        }
-        for (0..max_smp_slots) |i| {
-            if (shd.cmn.samplers[i].stage == .none) continue;
-            var dset_offset: u64 = 0;
-            self.fns.device.vkGetDescriptorSetLayoutBindingOffsetEXT.?(self.dev, payload.view_smp_dsl, payload.smp_set1_bnd_n[i], &dset_offset);
-            payload.smp_dset_offsets[i] = @intCast(dset_offset);
+        if (self.use_descriptor_buffer) {
+            // store view/smp descriptor set size and descriptor offsets
+            self.fns.device.vkGetDescriptorSetLayoutSizeEXT.?(self.dev, payload.view_smp_dsl, &payload.view_smp_dset_size);
+            for (0..max_view_slots) |i| {
+                if (shd.cmn.views[i].stage == .none) continue;
+                var dset_offset: u64 = 0;
+                self.fns.device.vkGetDescriptorSetLayoutBindingOffsetEXT.?(self.dev, payload.view_smp_dsl, payload.view_set1_bnd_n[i], &dset_offset);
+                payload.view_dset_offsets[i] = @intCast(dset_offset);
+            }
+            for (0..max_smp_slots) |i| {
+                if (shd.cmn.samplers[i].stage == .none) continue;
+                var dset_offset: u64 = 0;
+                self.fns.device.vkGetDescriptorSetLayoutBindingOffsetEXT.?(self.dev, payload.view_smp_dsl, payload.smp_set1_bnd_n[i], &dset_offset);
+                payload.smp_dset_offsets[i] = @intCast(dset_offset);
+            }
         }
 
         var set_layouts: [2]sdk.DescriptorSetLayout = .{ payload.ub_dsl, payload.view_smp_dsl };
@@ -737,7 +783,7 @@ pub const Backend = struct {
             .pushConstantRangeCount = 0,
             .pPushConstantRanges = null,
         };
-        if (self.fns.device.vkCreatePipelineLayout(self.dev, &pl_create_info, null, &payload.pip_layout) != sdk.SUCCESS) {
+        if (observe(self.fns.device.vkCreatePipelineLayout(self.dev, &pl_create_info, null, &payload.pip_layout)) != sdk.SUCCESS) {
             core.logError(.vulkan_create_pipeline_layout_failed);
             return .failed;
         }
@@ -765,6 +811,7 @@ pub const Backend = struct {
     }
 
     pub fn createPipeline(self: *Backend, pip: *core.Pipeline, desc: *const t.PipelineDesc) e.ResourceState {
+        if (!memory.reserveDeleteQueue(self)) return .failed;
         const d = &self.fns.device;
         pip.native = .{ .vulkan = .{} };
         const payload = &pip.native.vulkan;
@@ -776,7 +823,7 @@ pub const Backend = struct {
             const pip_create_info: sdk.ComputePipelineCreateInfo = .{
                 .sType = sdk.STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
                 .pNext = null,
-                .flags = sdk.PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT,
+                .flags = if (self.use_descriptor_buffer) sdk.PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT else 0,
                 .stage = .{
                     .sType = sdk.STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                     .pNext = null,
@@ -790,7 +837,7 @@ pub const Backend = struct {
                 .basePipelineHandle = 0,
                 .basePipelineIndex = 0,
             };
-            if (d.vkCreateComputePipelines(self.dev, 0, 1, @ptrCast(&pip_create_info), null, @ptrCast(&payload.pip)) != sdk.SUCCESS) {
+            if (observe(d.vkCreateComputePipelines(self.dev, self.pipeline_cache, 1, @ptrCast(&pip_create_info), null, @ptrCast(&payload.pip))) != sdk.SUCCESS) {
                 core.logError(.vulkan_create_compute_pipeline_failed);
                 return .failed;
             }
@@ -965,7 +1012,7 @@ pub const Backend = struct {
             const pip_create_info: sdk.GraphicsPipelineCreateInfo = .{
                 .sType = sdk.STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
                 .pNext = @ptrCast(&rnd_state),
-                .flags = sdk.PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT,
+                .flags = if (self.use_descriptor_buffer) sdk.PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT else 0,
                 .stageCount = num_stages,
                 .pStages = &stages[0],
                 .pVertexInputState = &vi_state,
@@ -983,7 +1030,7 @@ pub const Backend = struct {
                 .basePipelineHandle = 0,
                 .basePipelineIndex = 0,
             };
-            if (d.vkCreateGraphicsPipelines(self.dev, 0, 1, @ptrCast(&pip_create_info), null, @ptrCast(&payload.pip)) != sdk.SUCCESS) {
+            if (observe(d.vkCreateGraphicsPipelines(self.dev, self.pipeline_cache, 1, @ptrCast(&pip_create_info), null, @ptrCast(&payload.pip))) != sdk.SUCCESS) {
                 core.logError(.vulkan_create_graphics_pipeline_failed);
                 return .failed;
             }
@@ -1015,6 +1062,7 @@ pub const Backend = struct {
     }
 
     pub fn createView(self: *Backend, view: *core.View, desc: *const t.ViewDesc) e.ResourceState {
+        if (!memory.reserveDeleteQueue(self)) return .failed;
         view.native = .{ .vulkan = .{} };
         const payload = &view.native.vulkan;
         const dp = &self.descriptor_buffer_props;
@@ -1025,6 +1073,7 @@ pub const Backend = struct {
             .data = std.mem.zeroes(sdk.DescriptorDataEXT),
         };
         if (view.cmn.type == .storagebuffer) {
+            if (!self.use_descriptor_buffer) return .valid;
             // record descriptor data for storage buffer
             payload.descriptor_size = @intCast(dp.storageBufferDescriptorSize);
             if (res.max_descriptor_data_size < payload.descriptor_size) {
@@ -1074,7 +1123,7 @@ pub const Backend = struct {
             } else {
                 create_info.subresourceRange.aspectMask = sdk.IMAGE_ASPECT_COLOR_BIT;
             }
-            if (self.fns.device.vkCreateImageView(self.dev, &create_info, null, &payload.img_view) != sdk.SUCCESS) {
+            if (observe(self.fns.device.vkCreateImageView(self.dev, &create_info, null, &payload.img_view)) != sdk.SUCCESS) {
                 core.logError(.vulkan_create_image_view_failed);
                 return .failed;
             }
@@ -1082,7 +1131,7 @@ pub const Backend = struct {
             memory.setObjectLabel(self, sdk.OBJECT_TYPE_IMAGE_VIEW, payload.img_view, desc.label);
 
             // record descriptor data for storage images and textures
-            if (view.cmn.type == .storageimage or view.cmn.type == .texture) {
+            if (self.use_descriptor_buffer and (view.cmn.type == .storageimage or view.cmn.type == .texture)) {
                 var img_info: sdk.DescriptorImageInfo = .{ .sampler = 0, .imageView = payload.img_view, .imageLayout = 0 };
                 if (view.cmn.type == .storageimage) {
                     payload.descriptor_size = @intCast(dp.storageImageDescriptorSize);
@@ -1458,6 +1507,9 @@ pub const Backend = struct {
         std.debug.assert(self.queue != null);
         if (self.frame.cmd_buf != null) {
             self.submitFrameCommandBuffers();
+        } else if (core.state().readbacks.items.len == 0 and observe(self.fns.device.vkGetFenceStatus(self.dev, self.frame.slots[self.frame_slot].fence)) == sdk.SUCCESS) {
+            // Idle resource-only frames still retire objects, without a GPU wait.
+            memory.deleteQueueCollect(self);
         }
         self.present_complete_sem = 0;
         self.render_finished_sem = 0;
@@ -1532,6 +1584,7 @@ pub const Backend = struct {
     }
 
     fn bindViewSmpDescriptorSet(self: *Backend, cmd_buf: sdk.CommandBuffer, bnd: *const core.BindingsPtrs, bind_point: i32) bool {
+        if (!self.use_descriptor_buffer) return sets.bindViews(self, cmd_buf, bnd, bind_point);
         const shd = bnd.pip.cmn.shader.get();
         const shd_payload = &shd.native.vulkan;
 
@@ -1575,6 +1628,7 @@ pub const Backend = struct {
     }
 
     fn bindUniformDescriptorSet(self: *Backend, cmd_buf: sdk.CommandBuffer) bool {
+        if (!self.use_descriptor_buffer) return sets.bindUniforms(self, cmd_buf);
         std.debug.assert(self.uniforms.dirty);
         self.uniforms.dirty = false;
         const st = core.state();
@@ -1593,7 +1647,7 @@ pub const Backend = struct {
 
         // update the descriptor buffer
         std.debug.assert(shd_payload.ub_dset_size <= self.uniforms.dset_cache_size);
-        @memcpy(dbuf_ptr[0..shd_payload.ub_dset_size], self.uniforms.dset_cache[0..shd_payload.ub_dset_size]);
+        @memcpy(dbuf_ptr[0..@as(usize, @intCast(shd_payload.ub_dset_size))], self.uniforms.dset_cache[0..@as(usize, @intCast(shd_payload.ub_dset_size))]);
 
         // record the descriptor buffer offset
         const bind_point: i32 = if (st.cur_pass.is_compute) sdk.PIPELINE_BIND_POINT_COMPUTE else sdk.PIPELINE_BIND_POINT_GRAPHICS;
@@ -1618,6 +1672,11 @@ pub const Backend = struct {
         if (self.uniforms.dbuf.overflown) {
             core.logError(.vulkan_uniform_buffer_overflow);
             st.next_draw_valid = false;
+            return;
+        }
+        self.uniform_buffer_infos[ub_slot] = .{ .buffer = self.uniforms.dbuf.cur_buf, .offset = ubuf_offset, .range = data.size };
+        if (!self.use_descriptor_buffer) {
+            self.uniforms.dirty = true;
             return;
         }
         self.uniforms.addr_info[ub_slot].range = data.size;
@@ -1685,12 +1744,12 @@ pub const Backend = struct {
     pub fn writeBufferUnsealed(self: *Backend, buf: *core.Buffer, desc: *const t.WriteBufferDesc) void {
         std.debug.assert(buf.slot.state == .unsealed and buf.cmn.usage.write_unsealed);
         std.debug.assert(desc.src.data.ptr != null and desc.src.data.size > 0);
-        memory.stagingCopyBufferData(self, buf, &desc.src.data, desc.src.offset, desc.dst.offset, desc.size, false);
+        _ = memory.stagingCopyBufferData(self, buf, &desc.src.data, desc.src.offset, desc.dst.offset, desc.size);
     }
 
     pub fn writeImageUnsealed(self: *Backend, img: *core.Image, desc: *const t.WriteImageDesc) void {
         std.debug.assert(img.slot.state == .unsealed and img.cmn.usage.write_unsealed);
-        memory.stagingCopyMiplevelData(self, img, mipSource(desc.src), mipRegion(desc.dst, desc.size), false);
+        _ = memory.stagingCopyMiplevelData(self, img, mipSource(desc.src), mipRegion(desc.dst, desc.size));
     }
 
     pub fn sealBuffer(self: *Backend, buf: *core.Buffer) void {
@@ -1759,13 +1818,56 @@ pub const Backend = struct {
         begin(cmd_buf, &label);
     }
 
+    pub fn requestBufferRead(self: *Backend, buffer: *core.Buffer, offset: usize, out: []u8) ?*@import("../../readback_task.zig").Task {
+        if (self.frame.cmd_buf != null) self.commit();
+        const read = NativeRead.create(self, out.len, out) orelse return null;
+        var submitted = false;
+        defer if (!submitted) read.destroyResources();
+        readbackDependency(self, read.command, false);
+        const access = buffer.native.vulkan.cur_access;
+        barrier.bufferBarrier(&self.fns.device, read.command, buffer, barrier.copy_src);
+        const copy: sdk.BufferCopy = .{ .srcOffset = offset, .dstOffset = 0, .size = out.len };
+        self.fns.device.vkCmdCopyBuffer(read.command, buffer.native.vulkan.buf, read.staging.buf, 1, @ptrCast(&copy));
+        barrier.bufferBarrier(&self.fns.device, read.command, buffer, access);
+        readbackDependency(self, read.command, true);
+        if (!read.submit()) return null;
+        submitted = true;
+        return &read.task;
+    }
+    pub fn requestImageRead(self: *Backend, image: *core.Image, region: *const core.ReadRegion, out: []u8) ?*@import("../../readback_task.zig").Task {
+        if (self.frame.cmd_buf != null) self.commit();
+        const bpp: usize = @intCast(formats.pixelSize(image.cmn.pixel_format));
+        const row = @as(usize, region.width) * bpp;
+        const read = NativeRead.create(self, row * region.height * region.num_slices, out) orelse return null;
+        var submitted = false;
+        defer if (!submitted) read.destroyResources();
+        read.row_bytes = row;
+        read.rows = region.height;
+        read.slices = region.num_slices;
+        read.target_row = region.bytes_per_row;
+        read.target_slice = region.bytes_per_slice;
+        const is3d = image.cmn.type == .@"3d";
+        const old_layout = barrier.imageLayout(image.native.vulkan.cur_access);
+        readbackDependency(self, read.command, false);
+        readbackTransition(self, image.native.vulkan.img, sdk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, read.command, sdk.PIPELINE_STAGE_2_ALL_COMMANDS_BIT, sdk.ACCESS_2_MEMORY_READ_BIT | sdk.ACCESS_2_MEMORY_WRITE_BIT, sdk.PIPELINE_STAGE_2_COPY_BIT, sdk.ACCESS_2_TRANSFER_READ_BIT, old_layout);
+        const copy: sdk.BufferImageCopy = .{ .bufferOffset = 0, .bufferRowLength = 0, .bufferImageHeight = 0, .imageSubresource = .{ .aspectMask = sdk.IMAGE_ASPECT_COLOR_BIT, .mipLevel = region.mip_level, .baseArrayLayer = if (is3d) 0 else region.slice, .layerCount = if (is3d) 1 else region.num_slices }, .imageOffset = .{ .x = @intCast(region.x), .y = @intCast(region.y), .z = if (is3d) @intCast(region.slice) else 0 }, .imageExtent = .{ .width = region.width, .height = region.height, .depth = if (is3d) region.num_slices else 1 } };
+        self.fns.device.vkCmdCopyImageToBuffer(read.command, image.native.vulkan.img, sdk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, read.staging.buf, 1, @ptrCast(&copy));
+        readbackTransition(self, image.native.vulkan.img, old_layout, read.command, sdk.PIPELINE_STAGE_2_COPY_BIT, sdk.ACCESS_2_TRANSFER_READ_BIT, sdk.PIPELINE_STAGE_2_ALL_COMMANDS_BIT, sdk.ACCESS_2_MEMORY_READ_BIT | sdk.ACCESS_2_MEMORY_WRITE_BIT, sdk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        readbackDependency(self, read.command, true);
+        if (!read.submit()) return null;
+        submitted = true;
+        return &read.task;
+    }
+
     /// Readback (zicr extension): waits for committed GPU work, copies buffer bytes into `out`.
     pub fn readBuffer(self: *Backend, buf: *core.Buffer, offset: usize, out: []u8) bool {
+        if (self.frame.cmd_buf != null) self.commit();
         return readbackBuffer(self, buf, offset, out);
     }
 
     /// Readback (zicr extension): waits for committed GPU work, copies an image region into `out`.
     pub fn readImage(self: *Backend, img: *core.Image, region: *const core.ReadRegion, out: []u8) bool {
+        if (self.frame.cmd_buf != null) self.commit();
         return readbackImage(self, img, region, out);
     }
 
@@ -1819,15 +1921,15 @@ fn createReadbackStaging(self: *Backend, size: u64) ?ReadbackStaging {
         .pQueueFamilyIndices = null,
     };
     var buf: u64 = 0;
-    if (self.fns.device.vkCreateBuffer(self.dev, &info, null, &buf) != sdk.SUCCESS) return null;
+    if (observe(self.fns.device.vkCreateBuffer(self.dev, &info, null, &buf)) != sdk.SUCCESS) return null;
     var reqs: sdk.MemoryRequirements = undefined;
     self.fns.device.vkGetBufferMemoryRequirements(self.dev, buf, &reqs);
-    const mem = memory.allocDeviceMemory(self, .staging_copy, &reqs);
+    const mem = memory.allocDeviceMemory(self, .staging_readback, &reqs);
     if (mem == 0) {
         self.fns.device.vkDestroyBuffer(self.dev, buf, null);
         return null;
     }
-    if (self.fns.device.vkBindBufferMemory(self.dev, buf, mem, 0) != sdk.SUCCESS) {
+    if (observe(self.fns.device.vkBindBufferMemory(self.dev, buf, mem, 0)) != sdk.SUCCESS) {
         self.fns.device.vkDestroyBuffer(self.dev, buf, null);
         memory.freeDeviceMemory(self, mem);
         return null;
@@ -1843,9 +1945,18 @@ fn destroyReadbackStaging(self: *Backend, staging: ReadbackStaging) void {
 /// Maps the staging memory; the caller unmaps it after copying out.
 fn mapReadbackStaging(self: *Backend, staging: ReadbackStaging, size: u64) ?[*]u8 {
     var ptr: ?*anyopaque = null;
-    if (self.fns.device.vkMapMemory(self.dev, staging.mem, 0, size, 0, &ptr) != sdk.SUCCESS) return null;
+    if (observe(self.fns.device.vkMapMemory(self.dev, staging.mem, 0, size, 0, &ptr)) != sdk.SUCCESS) return null;
     const p: [*]u8 = @ptrCast(ptr orelse return null);
     return p;
+}
+
+/// Cross-submission execution dependency for transfers. Readback destinations
+/// may reuse device-memory ranges previously read as vertices; queue order alone
+/// does not create the execution dependency required for a write-after-read.
+fn readbackDependency(self: *Backend, cmd: sdk.CommandBuffer, host_read: bool) void {
+    const memory_barrier: sdk.MemoryBarrier2 = .{ .sType = sdk.STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = if (host_read) sdk.PIPELINE_STAGE_2_COPY_BIT else sdk.PIPELINE_STAGE_2_ALL_COMMANDS_BIT, .srcAccessMask = if (host_read) sdk.ACCESS_2_TRANSFER_WRITE_BIT else sdk.ACCESS_2_MEMORY_READ_BIT | sdk.ACCESS_2_MEMORY_WRITE_BIT, .dstStageMask = if (host_read) 0x4000 else sdk.PIPELINE_STAGE_2_COPY_BIT, .dstAccessMask = if (host_read) 0x2000 else sdk.ACCESS_2_TRANSFER_READ_BIT | sdk.ACCESS_2_TRANSFER_WRITE_BIT };
+    const dependency: sdk.DependencyInfo = .{ .sType = sdk.STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &memory_barrier };
+    self.fns.device.vkCmdPipelineBarrier2(cmd, &dependency);
 }
 
 /// Copies `out.len` bytes starting at `offset`. Waits for all submitted work (memory.stagingCopyEnd).
@@ -1853,14 +1964,16 @@ fn readbackBuffer(self: *Backend, buf: *core.Buffer, offset: usize, out: []u8) b
     const staging = createReadbackStaging(self, out.len) orelse return false;
     defer destroyReadbackStaging(self, staging);
     const d = &self.fns.device;
-    const cmd = memory.stagingCopyBegin(self);
+    const cmd = memory.stagingCopyBegin(self) orelse return false;
+    readbackDependency(self, cmd, false);
     const old_access = buf.native.vulkan.cur_access;
     barrier.bufferBarrier(d, cmd, buf, barrier.copy_src);
     const region: sdk.BufferCopy = .{ .srcOffset = offset, .dstOffset = 0, .size = out.len };
     d.vkCmdCopyBuffer(cmd, buf.native.vulkan.buf, staging.buf, 1, @ptrCast(&region));
     core.statsInc("vk.num_cmd_copy_buffer");
     barrier.bufferBarrier(d, cmd, buf, old_access);
-    memory.stagingCopyEnd(self, cmd);
+    readbackDependency(self, cmd, true);
+    if (!memory.stagingCopyEnd(self, cmd)) return false;
     const src = mapReadbackStaging(self, staging, out.len) orelse return false;
     @memcpy(out, src[0..out.len]);
     self.fns.device.vkUnmapMemory(self.dev, staging.mem);
@@ -1913,7 +2026,8 @@ fn readbackImage(self: *Backend, img: *core.Image, region: *const core.ReadRegio
     defer destroyReadbackStaging(self, staging);
 
     const d = &self.fns.device;
-    const cmd = memory.stagingCopyBegin(self);
+    const cmd = memory.stagingCopyBegin(self) orelse return false;
+    readbackDependency(self, cmd, false);
     const old_layout = barrier.imageLayout(payload.cur_access);
     // conservative synchronization: everything before, transfer read, everything after
     const all_stages = sdk.PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
@@ -1935,7 +2049,8 @@ fn readbackImage(self: *Backend, img: *core.Image, region: *const core.ReadRegio
     d.vkCmdCopyImageToBuffer(cmd, payload.img, sdk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging.buf, 1, @ptrCast(&copy));
     core.statsInc("vk.num_cmd_copy_buffer_to_image");
     readbackTransition(self, payload.img, old_layout, cmd, sdk.PIPELINE_STAGE_2_COPY_BIT, sdk.ACCESS_2_TRANSFER_READ_BIT, all_stages, all_access, sdk.IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-    memory.stagingCopyEnd(self, cmd);
+    readbackDependency(self, cmd, true);
+    if (!memory.stagingCopyEnd(self, cmd)) return false;
 
     const src = mapReadbackStaging(self, staging, total) orelse return false;
     defer self.fns.device.vkUnmapMemory(self.dev, staging.mem);
@@ -1947,4 +2062,180 @@ fn readbackImage(self: *Backend, img: *core.Image, region: *const core.ReadRegio
         }
     }
     return true;
+}
+
+// Every asynchronous copy owns its command pool, staging allocation and fence.
+// Frame-slot recycling cannot reset a command buffer whose ticket is pending.
+const NativeRead = struct {
+    task: @import("../../readback_task.zig").Task,
+    backend: *Backend,
+    staging: ReadbackStaging = .{ .buf = 0, .mem = 0 },
+    pool: sdk.CommandPool = 0,
+    command: sdk.CommandBuffer = null,
+    fence: sdk.Fence = 0,
+    size: usize,
+    row_bytes: usize = 0,
+    rows: usize = 1,
+    slices: usize = 1,
+    target_row: usize = 0,
+    target_slice: usize = 0,
+    query_error_reported: bool = false,
+    fn create(backend: *Backend, size: usize, out: []u8) ?*NativeRead {
+        const read = backend.allocator.create(NativeRead) catch return null;
+        read.* = .{ .task = .{ .owner = core.state(), .allocator = backend.allocator, .data = out, .poll_fn = poll, .destroy_fn = destroy }, .backend = backend, .size = size };
+        var success = false;
+        defer if (!success) read.destroyResources();
+        read.staging = createReadbackStaging(backend, size) orelse return null;
+        const pool_info: sdk.CommandPoolCreateInfo = .{ .sType = sdk.STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .queueFamilyIndex = backend.queue_family_index };
+        const d = &backend.fns.device;
+        if (observe(d.vkCreateCommandPool(backend.dev, &pool_info, null, &read.pool)) != sdk.SUCCESS) return null;
+        const allocation: sdk.CommandBufferAllocateInfo = .{ .sType = sdk.STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = read.pool, .level = sdk.COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1 };
+        if (observe(d.vkAllocateCommandBuffers(backend.dev, &allocation, &read.command)) != sdk.SUCCESS) return null;
+        const fence_info: sdk.FenceCreateInfo = .{ .sType = sdk.STRUCTURE_TYPE_FENCE_CREATE_INFO };
+        if (observe(d.vkCreateFence(backend.dev, &fence_info, null, &read.fence)) != sdk.SUCCESS) return null;
+        const begin_info: sdk.CommandBufferBeginInfo = .{ .sType = sdk.STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = sdk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
+        if (observe(d.vkBeginCommandBuffer(read.command, &begin_info)) != sdk.SUCCESS) return null;
+        success = true;
+        return read;
+    }
+    fn submit(self: *NativeRead) bool {
+        const backend = self.backend;
+        if (observe(backend.fns.device.vkEndCommandBuffer(self.command)) != sdk.SUCCESS) return false;
+        const info: sdk.SubmitInfo = .{ .sType = sdk.STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = @ptrCast(&self.command) };
+        core.statsInc("vk.num_queue_submits");
+        return observe(backend.fns.device.vkQueueSubmit(backend.queue, 1, @ptrCast(&info), self.fence)) == sdk.SUCCESS;
+    }
+    fn poll(task: *@import("../../readback_task.zig").Task, wait: bool) error{ReadFailed}!bool {
+        const self: *NativeRead = @alignCast(@fieldParentPtr("task", task));
+        const backend = self.backend;
+        const d = &backend.fns.device;
+        const result = observe(if (wait) d.vkWaitForFences(backend.dev, 1, @ptrCast(&self.fence), sdk.TRUE, std.math.maxInt(u64)) else d.vkGetFenceStatus(backend.dev, self.fence));
+        var progress = @import("result.zig").fenceProgress(result);
+        if (progress == .retry and wait) {
+            // Only teardown may block. If a fence query failed without removal,
+            // a successful idle wait is independent proof that copies finished.
+            const idle = observe(d.vkDeviceWaitIdle(backend.dev));
+            progress = if (idle == sdk.SUCCESS) .complete else if (idle == -4) .lost else .retry;
+        }
+        switch (progress) {
+            .pending => return false,
+            .lost => return error.ReadFailed,
+            .retry => {
+                if (!self.query_error_reported) {
+                    core.logWarn(.vulkan_fence_status_retry);
+                    self.query_error_reported = true;
+                }
+                return false; // retain GPU ownership until completion is proved
+            },
+            .complete => {},
+        }
+        if (task.refs == 1) return true; // cancelled: no CPU copy is needed
+        const source = mapReadbackStaging(backend, self.staging, self.size) orelse return error.ReadFailed;
+        defer d.vkUnmapMemory(backend.dev, self.staging.mem);
+        if (self.row_bytes == 0) {
+            @memcpy(task.data, source[0..task.data.len]);
+        } else for (0..self.slices) |slice| for (0..self.rows) |row| {
+            const from = (slice * self.rows + row) * self.row_bytes;
+            const to = slice * self.target_slice + row * self.target_row;
+            @memcpy(task.data[to..][0..self.row_bytes], source[from..][0..self.row_bytes]);
+        };
+        return true;
+    }
+    fn destroyResources(self: *NativeRead) void {
+        const backend = self.backend;
+        if (self.pool != 0) backend.fns.device.vkDestroyCommandPool(backend.dev, self.pool, null);
+        if (self.fence != 0) backend.fns.device.vkDestroyFence(backend.dev, self.fence, null);
+        if (self.staging.buf != 0) destroyReadbackStaging(backend, self.staging);
+        backend.allocator.destroy(self);
+    }
+    fn destroy(task: *@import("../../readback_task.zig").Task) void {
+        const self: *NativeRead = @alignCast(@fieldParentPtr("task", task));
+        task.allocator.free(task.data);
+        self.destroyResources();
+    }
+};
+
+test "cancelled readback retains GPU objects after a healthy fence-query error" {
+    const Task = @import("../../readback_task.zig").Task;
+    const Mock = struct {
+        var queries: usize = 0;
+        var destroyed: usize = 0;
+        var idle_calls: usize = 0;
+        var buffers_destroyed: usize = 0;
+        fn destroyBuffer(_: sdk.Device, _: sdk.Buffer, _: ?*const sdk.AllocationCallbacks) callconv(.c) void {
+            buffers_destroyed += 1;
+        }
+        fn waitFailure(_: sdk.Device, _: u32, _: [*]const sdk.Fence, _: u32, _: u64) callconv(.c) i32 {
+            return -1;
+        }
+        fn idle(_: sdk.Device) callconv(.c) i32 {
+            idle_calls += 1;
+            return sdk.SUCCESS;
+        }
+        fn removed(_: sdk.Device, _: sdk.Fence) callconv(.c) i32 {
+            return -4;
+        }
+        fn status(_: sdk.Device, _: sdk.Fence) callconv(.c) i32 {
+            queries += 1;
+            return if (queries == 1) -1 else sdk.SUCCESS; // transient host OOM
+        }
+        fn discard(_: *Task) void {
+            destroyed += 1;
+        }
+        fn log(_: ?[*:0]const u8, _: u32, _: u32, _: ?[*:0]const u8, _: u32, _: ?[*:0]const u8, _: ?*anyopaque) void {}
+    };
+    Mock.queries = 0;
+    Mock.destroyed = 0;
+    Mock.idle_calls = 0;
+    Mock.buffers_destroyed = 0;
+    var state: core.State = .{ .allocator = std.testing.allocator, .desc = .{}, .pools = undefined, .backend = .dummy, .commit_listeners = &.{} };
+    state.desc.logger.func = Mock.log;
+    const scope = core.enter(&state);
+    defer scope.end();
+    defer state.readbacks.deinit(std.testing.allocator);
+    var backend: Backend = .{ .allocator = std.testing.allocator };
+    backend.fns.device.vkGetFenceStatus = Mock.status;
+    backend.fns.device.vkWaitForFences = Mock.waitFailure;
+    backend.fns.device.vkDeviceWaitIdle = Mock.idle;
+    backend.fns.device.vkDestroyBuffer = Mock.destroyBuffer;
+    var retired = [_]memory.DeleteItem{.{ .kind = .buffer, .obj = 42 }};
+    backend.frame.slots[0].delete_queue = .{ .items = &retired, .index = 1 };
+    var bytes: [1]u8 = .{0};
+    var read: NativeRead = .{ .backend = &backend, .fence = 1, .size = 1, .task = .{ .owner = &state, .allocator = std.testing.allocator, .data = &bytes, .poll_fn = NativeRead.poll, .destroy_fn = Mock.discard } };
+    try state.readbacks.append(std.testing.allocator, &read.task);
+    read.task.release(); // client cancels, Device still owns its reference
+    @import("../../readback_task.zig").collect(&state, false);
+    try std.testing.expectEqual(@as(usize, 1), state.readbacks.items.len);
+    try std.testing.expectEqual(@as(usize, 0), Mock.destroyed);
+    try std.testing.expect(!read.task.failed);
+    try std.testing.expectEqual(@as(usize, 0), Mock.idle_calls);
+    try std.testing.expectEqual(@as(i32, 0), state.loss_code.load(.acquire));
+    memory.deleteQueueCollect(&backend);
+    try std.testing.expectEqual(@as(usize, 0), Mock.buffers_destroyed);
+    try std.testing.expectEqual(@as(u32, 1), backend.frame.slots[0].delete_queue.index);
+    @import("../../readback_task.zig").collect(&state, false);
+    try std.testing.expectEqual(@as(usize, 0), state.readbacks.items.len);
+    try std.testing.expectEqual(@as(usize, 1), Mock.destroyed);
+    memory.deleteQueueCollect(&backend);
+    try std.testing.expectEqual(@as(usize, 1), Mock.buffers_destroyed);
+    try std.testing.expectEqual(@as(u32, 0), backend.frame.slots[0].delete_queue.index);
+    // Reuse the now-retired stack fixture: teardown may prove completion through
+    // an independent idle wait when the private fence wait itself fails.
+    read.task = .{ .owner = &state, .allocator = std.testing.allocator, .data = &bytes, .poll_fn = NativeRead.poll, .destroy_fn = Mock.discard };
+    try state.readbacks.append(std.testing.allocator, &read.task);
+    read.task.release();
+    @import("../../readback_task.zig").collect(&state, true);
+    try std.testing.expectEqual(@as(usize, 0), state.readbacks.items.len);
+    try std.testing.expectEqual(@as(usize, 1), Mock.idle_calls);
+    try std.testing.expectEqual(@as(usize, 2), Mock.destroyed);
+    // Confirmed removal is terminal, rather than a healthy-device query failure.
+    read.task = .{ .owner = &state, .allocator = std.testing.allocator, .data = &bytes, .poll_fn = NativeRead.poll, .destroy_fn = Mock.discard };
+    backend.fns.device.vkGetFenceStatus = Mock.removed;
+    try state.readbacks.append(std.testing.allocator, &read.task);
+    read.task.release();
+    @import("../../readback_task.zig").collect(&state, false);
+    try std.testing.expectEqual(@as(usize, 0), state.readbacks.items.len);
+    try std.testing.expectEqual(@as(usize, 3), Mock.destroyed);
+    try std.testing.expectEqual(@as(i32, -4), state.loss_code.load(.acquire));
+    try std.testing.expect(read.task.failed);
 }

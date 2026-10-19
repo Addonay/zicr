@@ -72,9 +72,9 @@ pub fn setup(s: *core.State) !void {
             var user_data = env.user_data;
             if (comptime GlWin32Loader.available) if (loader == null and s.backend == .glcore) {
                 // like _SOKOL_USE_WIN32_GL_LOADER: resolve through opengl32.dll
-                win32_gl_loader = GlWin32Loader.Loader.open() catch return error.MissingOpenGlFunction;
+                s.gl_loader = GlWin32Loader.Loader.open() catch return error.MissingOpenGlFunction;
                 loader = GlWin32Loader.Loader.getProcAddress;
-                user_data = &win32_gl_loader.?;
+                user_data = &s.gl_loader.?;
             };
             errdefer closeWin32GlLoader();
             const gl = try GlBackend.init(s.allocator, s.backend, loader orelse return error.MissingGlProcAddress, user_data, s.desc.logger);
@@ -99,11 +99,9 @@ pub fn setup(s: *core.State) !void {
 }
 
 /// The opengl32.dll loader must outlive the GL function pointers it resolved.
-var win32_gl_loader: ?GlWin32Loader.Loader = null;
-
 fn closeWin32GlLoader() void {
-    if (win32_gl_loader) |*loader| loader.close();
-    win32_gl_loader = null;
+    if (core.state().gl_loader) |*loader| loader.close();
+    core.state().gl_loader = null;
 }
 
 pub fn discard() void {
@@ -117,6 +115,21 @@ pub fn discard() void {
         .d3d11 => |*dx| dx.deinit(),
     }
     impl().* = .dummy;
+}
+
+/// Explicit polling for APIs which expose a removal status after device creation.
+pub fn pollDeviceLoss() void {
+    switch (impl().*) {
+        .d3d12 => |*dx| {
+            const code = @import("backends/d3d12/sdk.zig").getDeviceRemovedReason(dx.device);
+            if (code < 0) core.recordLoss(code);
+        },
+        .d3d11 => |*dx| {
+            const code = @import("backends/d3d11/sdk.zig").getDeviceRemovedReason(dx.device);
+            if (code < 0) core.recordLoss(code);
+        },
+        else => {}, // Vulkan reports VkResult; GL/WebGPU loss events are host-owned.
+    }
 }
 
 pub fn resetStateCache() void {
@@ -366,8 +379,16 @@ pub fn applyBindings(bnd: *const core.BindingsPtrs) bool {
     return switch (impl().*) {
         inline .vulkan, .wgpu, .metal, .d3d12 => |*b| b.applyBindings(bnd),
         .dummy => true,
-        .gl => |*gl| gl.applyBindings(&nativeBindings(gl_res, .gl, bnd)),
-        .d3d11 => |*dx| dx.applyBindings(&nativeBindings(d3d11_res, .d3d11, bnd)),
+        .gl => |*gl| blk: {
+            var native: gl_res.Bindings = undefined;
+            nativeBindings(gl_res, .gl, bnd, &native);
+            break :blk gl.applyBindings(&native);
+        },
+        .d3d11 => |*dx| blk: {
+            var native: d3d11_res.Bindings = undefined;
+            nativeBindings(d3d11_res, .d3d11, bnd, &native);
+            break :blk dx.applyBindings(&native);
+        },
     };
 }
 
@@ -558,24 +579,25 @@ fn nativeAttachments(comptime R: type, comptime tag: anytype, atts: *const core.
     return res;
 }
 
-fn nativeBindings(comptime R: type, comptime tag: anytype, bnd: *const core.BindingsPtrs) R.Bindings {
+fn nativeBindings(comptime R: type, comptime tag: anytype, bnd: *const core.BindingsPtrs, res: *R.Bindings) void {
     const pip = bnd.pip;
     const shd = pip.cmn.shader.get();
-    var res: R.Bindings = .{
+    // Build directly in the caller's scratch space rather than returning a
+    // multi-kilobyte optional-binding aggregate by value on every draw.
+    res.* = .{
         .pipeline = .{ .resource = &@field(pip.native, @tagName(tag)), .desc = &pip.desc, .slot = slotInfo(&pip.slot) },
         .shader = .{ .resource = &@field(shd.native, @tagName(tag)), .desc = &shd.desc },
         .vertex_offsets = bnd.vb_offsets,
         .index_offset = bnd.ib_offset,
     };
-    for (bnd.vbs, 0..) |vb, i| {
+    for (&bnd.vbs, 0..) |vb, i| {
         if (vb) |buf| res.vertex_buffers[i] = bufferBinding(R, tag, buf);
     }
     if (bnd.ib) |buf| res.index_buffer = bufferBinding(R, tag, buf);
-    for (bnd.views, 0..) |optional, i| {
+    for (&bnd.views, 0..) |optional, i| {
         if (optional) |view| res.views[i] = viewBinding(R, tag, view);
     }
-    for (bnd.smps, 0..) |optional, i| {
+    for (&bnd.smps, 0..) |optional, i| {
         if (optional) |smp| res.samplers[i] = &@field(smp.native, @tagName(tag));
     }
-    return res;
 }

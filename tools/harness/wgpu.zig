@@ -1,4 +1,4 @@
-//! A WebGPU device through wgpu-native, loaded at runtime from the library named by the
+//! A native WebGPU device (wgpu-native or ABI-compatible Dawn), loaded from the
 //! WGPU_NATIVE_LIB environment variable. Only the instance, adapter and device calls are
 //! declared here; every other webgpu function is resolved by the backend itself.
 const std = @import("std");
@@ -55,6 +55,12 @@ const QueueDescriptor = extern struct {
     next_in_chain: ?*const ChainedStruct = null,
     label: StringView = .{},
 };
+const InstanceDescriptor = extern struct {
+    next_in_chain: ?*const ChainedStruct = null,
+    required_feature_count: usize = 0,
+    required_features: ?[*]const u32 = null,
+    required_limits: ?*const anyopaque = null,
+};
 const DeviceDescriptor = extern struct {
     next_in_chain: ?*const ChainedStruct = null,
     label: StringView = .{},
@@ -79,14 +85,28 @@ const AdapterInfo = extern struct {
     subgroup_max_size: u32 = 0,
 };
 
+const WorkDoneInfo = extern struct {
+    next_in_chain: ?*const ChainedStruct = null,
+    mode: u32 = 1,
+    callback: ?*const fn (u32, StringView, ?*anyopaque, ?*anyopaque) callconv(.c) void = null,
+    userdata1: ?*anyopaque = null,
+    userdata2: ?*anyopaque = null,
+};
+const FutureWaitInfo = extern struct { future: Future, completed: u32 = 0 };
+
 const Procs = struct {
     wgpuCreateInstance: *const fn (?*const anyopaque) callconv(.c) ?*anyopaque,
     wgpuInstanceRequestAdapter: *const fn (?*anyopaque, ?*const anyopaque, RequestAdapterCallbackInfo) callconv(.c) Future,
     wgpuInstanceProcessEvents: *const fn (?*anyopaque) callconv(.c) void,
     wgpuInstanceRelease: *const fn (?*anyopaque) callconv(.c) void,
     wgpuAdapterRequestDevice: *const fn (?*anyopaque, ?*const DeviceDescriptor, RequestDeviceCallbackInfo) callconv(.c) Future,
+    wgpuAdapterHasFeature: *const fn (?*anyopaque, u32) callconv(.c) u32,
     wgpuAdapterGetInfo: *const fn (?*anyopaque, *AdapterInfo) callconv(.c) u32,
+    wgpuAdapterInfoFreeMembers: *const fn (AdapterInfo) callconv(.c) void,
     wgpuAdapterRelease: *const fn (?*anyopaque) callconv(.c) void,
+    wgpuDeviceGetQueue: *const fn (?*anyopaque) callconv(.c) ?*anyopaque,
+    wgpuQueueRelease: *const fn (?*anyopaque) callconv(.c) void,
+    wgpuQueueOnSubmittedWorkDone: *const fn (?*anyopaque, WorkDoneInfo) callconv(.c) Future,
     wgpuDeviceRelease: *const fn (?*anyopaque) callconv(.c) void,
 };
 
@@ -136,7 +156,9 @@ pub const Context = struct {
     device: *anyopaque,
     /// Incremented by the uncaptured error and device lost callbacks.
     native_errors: u32 = 0,
+    waiter: Waiter = .{},
     description_text: []u8,
+    timed_wait: bool = false,
 
     pub fn create(gpa: std.mem.Allocator, variant: harness.Variant) !*Context {
         _ = variant;
@@ -150,40 +172,56 @@ pub const Context = struct {
         inline for (@typeInfo(Procs).@"struct".field_names) |name| {
             @field(self.procs, name) = self.library.lookup(@TypeOf(@field(self.procs, name)), name) orelse return error.MissingWgpuFunction;
         }
-        self.instance = self.procs.wgpuCreateInstance(null) orelse return error.InstanceFailed;
+        const has_poll = self.library.lookup(*const anyopaque, "wgpuDevicePoll") != null;
+        const HasFeature = *const fn (u32) callconv(.c) u32;
+        self.timed_wait = if (has_poll) false else if (self.library.lookup(HasFeature, "wgpuHasInstanceFeature")) |has| has(1) != 0 else false;
+        const timed_feature: u32 = 1;
+        const instance_desc: InstanceDescriptor = .{ .required_feature_count = if (self.timed_wait) 1 else 0, .required_features = if (self.timed_wait) @ptrCast(&timed_feature) else null };
+        self.instance = self.procs.wgpuCreateInstance(&instance_desc) orelse return error.InstanceFailed;
         errdefer self.procs.wgpuInstanceRelease(self.instance);
 
-        var adapter_waiter: Waiter = .{};
+        self.waiter = .{};
+        const adapter_waiter = &self.waiter;
         _ = self.procs.wgpuInstanceRequestAdapter(self.instance, null, .{
             .mode = callback_mode_allow_process_events,
             .callback = onAdapter,
-            .userdata1 = &adapter_waiter,
+            .userdata1 = adapter_waiter,
         });
-        try self.pump(&adapter_waiter);
+        try self.pump(adapter_waiter);
         if (adapter_waiter.status != status_success) return error.AdapterFailed;
         self.adapter = adapter_waiter.handle orelse return error.AdapterFailed;
         errdefer self.procs.wgpuAdapterRelease(self.adapter);
 
         var info: AdapterInfo = .{};
-        _ = self.procs.wgpuAdapterGetInfo(self.adapter, &info);
-        self.description_text = try std.fmt.allocPrint(gpa, "{s} (wgpu-native, backend {d})", .{ messageText(info.description), info.backend_type });
+        const info_status = self.procs.wgpuAdapterGetInfo(self.adapter, &info);
+        defer self.procs.wgpuAdapterInfoFreeMembers(info);
+        if (info_status != status_success) return error.AdapterInfoFailed;
+        self.description_text = try std.fmt.allocPrint(gpa, "{s} (native WebGPU, backend {d}, {s})", .{ messageText(info.description), info.backend_type, if (has_poll) "DevicePoll" else if (self.timed_wait) "TimedWaitAny" else "ProcessEvents" });
         errdefer gpa.free(self.description_text);
 
         // depth32float-stencil8 is needed by the depth-stencil scenes
-        const features = [_]u32{feature_depth32_float_stencil8};
+        var features: [5]u32 = undefined;
+        var feature_count: usize = 0;
+        // webgpu.h v29: depth32-stencil8=3, BC=4, ETC2=6, ASTC=7, dual source=17.
+        for ([_]u32{ feature_depth32_float_stencil8, 4, 6, 7, 17 }) |feature| {
+            if (self.procs.wgpuAdapterHasFeature(self.adapter, feature) == 0) continue;
+            features[feature_count] = feature;
+            feature_count += 1;
+        }
         var device_desc: DeviceDescriptor = .{
-            .required_feature_count = features.len,
+            .required_feature_count = feature_count,
             .required_features = &features,
             .uncaptured_error_callback_info = .{ .callback = onUncapturedError, .userdata1 = self },
             .device_lost_callback_info = .{ .mode = callback_mode_allow_process_events, .callback = onDeviceLost, .userdata1 = self },
         };
-        var device_waiter: Waiter = .{};
+        self.waiter = .{};
+        const device_waiter = &self.waiter;
         _ = self.procs.wgpuAdapterRequestDevice(self.adapter, &device_desc, .{
             .mode = callback_mode_allow_process_events,
             .callback = onDevice,
-            .userdata1 = &device_waiter,
+            .userdata1 = device_waiter,
         });
-        try self.pump(&device_waiter);
+        try self.pump(device_waiter);
         if (device_waiter.status != status_success) return error.DeviceFailed;
         self.device = device_waiter.handle orelse return error.DeviceFailed;
         return self;
@@ -206,6 +244,38 @@ pub const Context = struct {
         self.gpa.destroy(self);
     }
 
+    pub fn createBenchmark(gpa: std.mem.Allocator, variant: harness.Variant) !*Context {
+        return create(gpa, variant);
+    }
+    pub fn validationAvailable(_: *Context) bool {
+        // No optional native debug/GPU-validation layer is requested. WebGPU's
+        // mandatory provider checks are shared equally by all benchmark modes.
+        return false;
+    }
+    pub fn waitFuture(self: *Context, id: u64) bool {
+        if (self.library.lookup(*const fn (?*anyopaque, u32, ?*const u64) callconv(.c) u32, "wgpuDevicePoll")) |poll| {
+            _ = poll(self.device, 1, null);
+            self.procs.wgpuInstanceProcessEvents(self.instance);
+            return true;
+        }
+        if (!self.timed_wait) return false;
+        const Wait = *const fn (?*anyopaque, usize, [*]FutureWaitInfo, u64) callconv(.c) u32;
+        const wait = self.library.lookup(Wait, "wgpuInstanceWaitAny") orelse return false;
+        var info: FutureWaitInfo = .{ .future = .{ .id = id } };
+        return wait(self.instance, 1, @ptrCast(&info), 1_000_000_000) == 1 and info.completed != 0;
+    }
+    fn workDone(status: u32, _: StringView, user: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
+        const result: *u32 = @ptrCast(@alignCast(user.?));
+        result.* = status;
+    }
+    pub fn drain(self: *Context) void {
+        const queue = self.procs.wgpuDeviceGetQueue(self.device) orelse @panic("no benchmark queue");
+        defer self.procs.wgpuQueueRelease(queue);
+        var status: u32 = 0;
+        const future = self.procs.wgpuQueueOnSubmittedWorkDone(queue, .{ .callback = workDone, .userdata1 = &status });
+        if (!self.waitFuture(future.id) or status != 1) @panic("benchmark GPU drain failed");
+    }
+
     /// Resolves webgpu.h names through the library, for the backend.
     fn resolve(name: [:0]const u8, user_data: ?*anyopaque) ?*const anyopaque {
         const self: *Context = @ptrCast(@alignCast(user_data.?));
@@ -215,6 +285,8 @@ pub const Context = struct {
     pub fn options(self: *Context) gpu.Options {
         return .{
             .backend = .{ .wgpu = .{
+                .instance = self.instance,
+                .wait_timeout_ns = if (self.timed_wait) 1_000_000_000 else 0,
                 .device = self.device,
                 .get_proc_address = resolve,
                 .user_data = self,

@@ -11,8 +11,8 @@ const k = @import("constants.zig");
 const sdk = @import("sdk.zig");
 const memory = @import("memory.zig");
 const res = @import("resources.zig");
-const convert = @import("../d3d11/convert.zig");
-const dx = @import("../d3d11/constants.zig");
+const convert = @import("../dxgi/convert.zig");
+const dx = @import("../dxgi/constants.zig");
 const Backend = @import("backend.zig").Backend;
 
 /// Where a copy reads from: an array of footprints, each `pitch` bytes per row and
@@ -69,14 +69,14 @@ pub fn beginPass(self: *Backend, pass: *const t.Pass, atts: *const core.Attachme
         const render = sdk.fromOpaque(sc.render_target orelse return false);
         self.swapchain.render = render;
         self.swapchain.resolve = if (sc.resolve_target) |ptr| sdk.fromOpaque(ptr) else null;
-        const rtv_handle = self.heaps[@intFromEnum(memory.Kind.rtv)].handle(slot);
+        const rtv_handle = self.heaps[@backingInt(memory.Kind.rtv)].handle(slot);
         sdk.createRenderTargetView(self.device, render, null, rtv_handle);
         barrier(list, render, k.state_present, k.state_render_target);
         rtvs[0] = rtv_handle;
         count = 1;
         if (sc.depth_stencil_target) |ptr| {
             self.swapchain.depth = sdk.fromOpaque(ptr);
-            dsv = self.heaps[@intFromEnum(memory.Kind.dsv)].handle(slot);
+            dsv = self.heaps[@backingInt(memory.Kind.dsv)].handle(slot);
             sdk.createDepthStencilView(self.device, self.swapchain.depth.?, null, dsv);
         }
     } else {
@@ -258,7 +258,7 @@ pub fn applyBindings(self: *Backend, bnd: *const core.BindingsPtrs) bool {
     for (0..res.stage_count) |stage| for (0..3) |kind| {
         const table = shader.tables[stage][kind];
         if (table.count == 0) continue;
-        const sampler_kind = kind == @intFromEnum(res.TableKind.sampler);
+        const sampler_kind = kind == @backingInt(res.TableKind.sampler);
         const ring: *memory.DescriptorRing = if (sampler_kind) &self.sampler_ring else &self.srv_ring;
         const range = ring.alloc(table.count) orelse {
             core.logError(.d3d12_descriptor_ring_overflow);
@@ -326,12 +326,23 @@ fn repackRows(dst: [*]u8, src: [*]const u8, src_row: usize, src_slice: usize, ro
     };
 }
 
-/// The footprint layout of a region of the given format: rows padded to 256 bytes, slices to 512.
-fn layout(format: e.PixelFormat, width: i32, height: i32) struct { row_bytes: usize, rows: usize, pitch: usize, stride: usize } {
-    const row_bytes: usize = @intCast(formats.rowPitch(format, width, 1));
-    const rows: usize = @intCast(formats.numRows(format, height));
-    const pitch = alignUp(row_bytes, k.texture_data_pitch_alignment);
-    return .{ .row_bytes = row_bytes, .rows = rows, .pitch = pitch, .stride = alignUp(pitch * rows, k.texture_data_placement_alignment) };
+const Layout = struct { row_bytes: usize, rows: usize, pitch: usize, stride: usize };
+
+/// Query a single-slice footprint from the device. Array and depth slices are
+/// copied separately at 512-byte-aligned placements; never infer BC block rows.
+fn layout(self: *Backend, format: e.PixelFormat, width: i32, height: i32) ?Layout {
+    const block: usize = @intCast(formats.blockDimension(format));
+    const desc: sdk.ResourceDesc = .{ .dimension = k.dimension_texture2d, .width = alignUp(@intCast(width), block), .height = @intCast(alignUp(@intCast(height), block)), .depth_or_array_size = 1, .mip_levels = 1, .format = convert.textureFormat(format), .sample_desc = .{ .count = 1 } };
+    var placed: sdk.PlacedFootprint = .{};
+    var rows: u32 = 0;
+    var row_bytes: u64 = 0;
+    var total: u64 = 0;
+    sdk.getCopyableFootprints(self.device, &desc, 0, 1, 0, @ptrCast(&placed), @ptrCast(&rows), @ptrCast(&row_bytes), &total);
+    if (total == std.math.maxInt(u64) or rows == 0 or row_bytes == 0 or placed.footprint.row_pitch == 0) {
+        core.logError(.d3d12_create_temp_buffer_failed);
+        return null;
+    }
+    return .{ .row_bytes = @intCast(row_bytes), .rows = rows, .pitch = placed.footprint.row_pitch, .stride = alignUp(@intCast(total), k.texture_data_placement_alignment) };
 }
 
 /// A CPU-written upload buffer for one-shot transfers, released after the GPU finished with it.
@@ -356,6 +367,14 @@ const TempUpload = struct {
         return .{ .resource = resource.?, .ptr = @ptrCast(mapped.?) };
     }
 
+    /// Frame uploads retain their staging resource until the frame fence completes.
+    fn finish(self: TempUpload, backend: *Backend, recorded_in_frame: bool) void {
+        if (recorded_in_frame) {
+            sdk.resourceUnmap(self.resource, 0);
+            backend.releaseLater(self.resource);
+        } else self.destroy();
+    }
+
     fn destroy(self: TempUpload) void {
         sdk.resourceUnmap(self.resource, 0);
         sdk.release(self.resource);
@@ -365,14 +384,16 @@ const TempUpload = struct {
 /// Copies the initial data of a buffer, or any range of CPU data, with a one-shot upload.
 pub fn uploadBufferOneShot(self: *Backend, buf: *core.Buffer, offset: usize, data: *const t.Range) bool {
     const temp = TempUpload.create(self, data.size) orelse return false;
-    defer temp.destroy();
+    var recorded_in_frame = false;
+    defer temp.finish(self, recorded_in_frame);
+    if (!self.reserveRelease()) return false;
     const source: [*]const u8 = @ptrCast(data.ptr.?);
     @memcpy(temp.ptr[0..data.size], source[0..data.size]);
-    const list = self.beginOneShot() orelse return false;
+    const list = self.frameList() orelse return false;
     const payload = &buf.native.d3d12;
     useState(list, payload.resource.?, &payload.state, k.state_copy_dest);
     sdk.copyBufferRegion(list, payload.resource, offset, temp.resource, 0, data.size);
-    self.endOneShot();
+    recorded_in_frame = true;
     return true;
 }
 
@@ -382,18 +403,20 @@ pub fn uploadImageOneShot(self: *Backend, img: *core.Image, desc: *const t.Image
     const mips: usize = @intCast(desc.num_mipmaps);
     var total: usize = 0;
     var offsets: [16]usize = undefined;
-    var plans: [16]@TypeOf(layout(.default, 1, 1)) = undefined;
+    var plans: [16]Layout = undefined;
     for (0..mips) |m| {
         const mip: i32 = @intCast(m);
         const slices: usize = @intCast(if (is_3d) formats.mipDimension(desc.num_slices, mip) else desc.num_slices);
-        const plan = layout(desc.pixel_format, formats.mipDimension(desc.width, mip), formats.mipDimension(desc.height, mip));
+        const plan = layout(self, desc.pixel_format, formats.mipDimension(desc.width, mip), formats.mipDimension(desc.height, mip)) orelse return false;
         plans[m] = plan;
         total = alignUp(total, k.texture_data_placement_alignment);
         offsets[m] = total;
         total += plan.stride * slices;
     }
     const temp = TempUpload.create(self, total) orelse return false;
-    defer temp.destroy();
+    var recorded_in_frame = false;
+    defer temp.finish(self, recorded_in_frame);
+    if (!self.reserveRelease()) return false;
     for (0..mips) |m| {
         const data = desc.data.mip_levels[m];
         const mip: i32 = @intCast(m);
@@ -403,7 +426,7 @@ pub fn uploadImageOneShot(self: *Backend, img: *core.Image, desc: *const t.Image
         const src_slice: usize = if (is_3d) @intCast(formats.surfacePitch(desc.pixel_format, formats.mipDimension(desc.width, mip), formats.mipDimension(desc.height, mip), 1)) else data.size / slices;
         repackRows(temp.ptr + offsets[m], source, plan.row_bytes, src_slice, plan.row_bytes, plan.rows, slices, plan.pitch, plan.stride);
     }
-    const list = self.beginOneShot() orelse return false;
+    const list = self.frameList() orelse return false;
     useState(list, img.native.d3d12.resource.?, &img.native.d3d12.state, k.state_copy_dest);
     for (0..mips) |m| {
         const mip: i32 = @intCast(m);
@@ -411,7 +434,7 @@ pub fn uploadImageOneShot(self: *Backend, img: *core.Image, desc: *const t.Image
         const footprints: Footprints = .{ .resource = temp.resource, .offset = offsets[m], .pitch = @intCast(plans[m].pitch), .stride = @intCast(plans[m].stride) };
         recordImageCopy(list, img, @intCast(m), 0, 0, 0, @intCast(formats.mipDimension(desc.width, mip)), @intCast(formats.mipDimension(desc.height, mip)), slices, footprints);
     }
-    self.endOneShot();
+    recorded_in_frame = true;
     return true;
 }
 
@@ -446,7 +469,7 @@ fn recordImageCopy(list: *sdk.Object, img: *core.Image, mip: u32, x: u32, y: u32
 pub fn writeImageTransient(self: *Backend, img: *core.Image, desc: *const t.WriteImageDesc, first_time_in_frame: bool) void {
     _ = first_time_in_frame;
     const list = self.frameList() orelse return;
-    const plan = layout(img.desc.pixel_format, desc.size.width, desc.size.height);
+    const plan = layout(self, img.desc.pixel_format, desc.size.width, desc.size.height) orelse return;
     const slices: usize = @intCast(desc.size.num_slices);
     const region = self.staging.alloc(plan.stride * slices, 512) orelse {
         core.logError(.d3d12_staging_overflow);
@@ -477,15 +500,17 @@ pub fn writeBufferTransient(self: *Backend, buf: *core.Buffer, desc: *const t.Wr
 
 /// Writes CPU data into an image with a one-shot upload, before the image is used by the GPU.
 pub fn writeImageUnsealed(self: *Backend, img: *core.Image, desc: *const t.WriteImageDesc) void {
-    const plan = layout(img.desc.pixel_format, desc.size.width, desc.size.height);
+    const plan = layout(self, img.desc.pixel_format, desc.size.width, desc.size.height) orelse return;
     const slices: usize = @intCast(desc.size.num_slices);
     const temp = TempUpload.create(self, plan.stride * slices) orelse return;
-    defer temp.destroy();
+    var recorded_in_frame = false;
+    defer temp.finish(self, recorded_in_frame);
+    if (!self.reserveRelease()) return;
     const source: [*]const u8 = @ptrCast(desc.src.data.ptr.?);
     repackRows(temp.ptr, source + desc.src.offset, @intCast(desc.src.bytes_per_row), @intCast(desc.src.bytes_per_slice), plan.row_bytes, plan.rows, slices, plan.pitch, plan.stride);
-    const list = self.beginOneShot() orelse return;
+    const list = self.frameList() orelse return;
     recordImageCopy(list, img, @intCast(desc.dst.mip_level), @intCast(desc.dst.x), @intCast(desc.dst.y), @intCast(desc.dst.slice), @intCast(desc.size.width), @intCast(desc.size.height), @intCast(slices), .{ .resource = temp.resource, .offset = 0, .pitch = @intCast(plan.pitch), .stride = @intCast(plan.stride) });
-    self.endOneShot();
+    recorded_in_frame = true;
 }
 
 pub fn writeBufferUnsealed(self: *Backend, buf: *core.Buffer, desc: *const t.WriteBufferDesc) void {
@@ -535,7 +560,7 @@ pub fn copyBufferToBuffer(self: *Backend, src: *core.Buffer, dst: *core.Buffer, 
 
 pub fn copyBufferToImage(self: *Backend, src: *core.Buffer, dst: *core.Image, desc: *const t.CopyBufferToImageDesc) void {
     const list = self.frameList() orelse return;
-    const plan = layout(dst.desc.pixel_format, desc.size.width, desc.size.height);
+    const plan = layout(self, dst.desc.pixel_format, desc.size.width, desc.size.height) orelse return;
     const slices: usize = @intCast(desc.size.num_slices);
     const mip: u32 = @intCast(desc.dst.mip_level);
     const x: u32 = @intCast(desc.dst.x);
@@ -563,20 +588,24 @@ pub fn copyBufferToImage(self: *Backend, src: *core.Buffer, dst: *core.Image, de
         return;
     }
     const temp_stride: u64 = @intCast(alignUp(@as(usize, pitch) * plan.rows, k.texture_data_placement_alignment));
-    const temp_desc = memory.bufferDesc(temp_stride * slices, 0);
+    if (!self.reserveRelease()) {
+        core.logError(.d3d12_create_temp_buffer_failed);
+        return;
+    }
+    const temp_desc = memory.bufferDesc(@intCast(temp_stride * slices), 0);
     const heap: sdk.HeapProperties = .{ .type = k.heap_default };
     var temp: ?*sdk.Object = null;
     if (sdk.createCommittedResource(self.device, &heap, k.heap_flag_none, &temp_desc, k.state_copy_dest, &temp) < 0 or temp == null) {
         core.logError(.d3d12_create_temp_buffer_failed);
         return;
     }
-    self.releaseLater(temp);
     const copy_bytes = @as(u64, pitch) * @as(u64, @intCast(plan.rows));
     for (0..slices) |s| {
         sdk.copyBufferRegion(list, temp, @as(u64, s) * temp_stride, src_payload.resource, @as(u64, @intCast(desc.src.offset)) + @as(u64, s) * stride, copy_bytes);
     }
     barrier(list, temp.?, k.state_copy_dest, k.state_copy_source);
     recordImageCopy(list, dst, mip, x, y, slice, width, height, @intCast(slices), .{ .resource = temp.?, .offset = 0, .pitch = pitch, .stride = temp_stride });
+    self.releaseLater(temp);
 }
 
 pub fn pushDebugGroup(self: *Backend, name: [*:0]const u8) void {
@@ -629,7 +658,7 @@ pub fn readBuffer(self: *Backend, buf: *core.Buffer, offset: usize, out: []u8) b
 /// Readback (zicr extension): submits the frame, waits for it, and copies an image region into `out`.
 pub fn readImage(self: *Backend, img: *core.Image, region: *const core.ReadRegion, out: []u8) bool {
     self.submitFrame();
-    const plan = layout(img.desc.pixel_format, @intCast(region.width), @intCast(region.height));
+    const plan = layout(self, img.desc.pixel_format, @intCast(region.width), @intCast(region.height)) orelse return false;
     const slices: usize = region.num_slices;
     const readback = createReadback(self, plan.stride * slices) orelse return false;
     defer sdk.release(readback);
@@ -671,4 +700,134 @@ pub fn readImage(self: *Backend, img: *core.Image, region: *const core.ReadRegio
         @memcpy(out[s * region.bytes_per_slice + y * region.bytes_per_row ..][0..plan.row_bytes], source[s * plan.stride + y * plan.pitch ..][0..plan.row_bytes]);
     };
     return true;
+}
+
+/// Readback copies have dedicated command objects/fences. They never reset the
+/// frame or upload command allocator, and request/poll do not wait for the GPU.
+const NativeRead = struct {
+    task: @import("../../readback_task.zig").Task,
+    backend: *Backend,
+    buffer: ?*sdk.Object = null,
+    allocator: ?*sdk.Object = null,
+    list: ?*sdk.Object = null,
+    fence: ?*sdk.Object = null,
+    event: sdk.Handle = null,
+    row_bytes: usize = 0,
+    rows: usize = 1,
+    slices: usize = 1,
+    source_pitch: usize = 0,
+    source_stride: usize = 0,
+    target_row: usize = 0,
+    target_slice: usize = 0,
+    fn create(backend: *Backend, size: usize, out: []u8) ?*NativeRead {
+        const self = backend.allocator.create(NativeRead) catch return null;
+        self.* = .{ .task = .{ .owner = core.state(), .allocator = backend.allocator, .data = out, .poll_fn = poll, .destroy_fn = destroy }, .backend = backend };
+        var success = false;
+        defer if (!success) self.destroyResources();
+        self.buffer = createReadback(backend, size) orelse return null;
+        if (sdk.createCommandAllocator(backend.device, k.command_list_type_direct, &self.allocator) < 0 or self.allocator == null) return null;
+        if (sdk.createCommandList(backend.device, k.command_list_type_direct, self.allocator.?, &self.list) < 0 or self.list == null) return null;
+        if (sdk.createFence(backend.device, 0, &self.fence) < 0 or self.fence == null) return null;
+        success = true;
+        return self;
+    }
+    fn submit(self: *NativeRead) bool {
+        if (sdk.listClose(self.list.?) < 0) return false;
+        var lists = [_]?*sdk.Object{self.list};
+        core.statsInc("d3d12.num_queue_submits");
+        sdk.queueExecuteCommandLists(self.backend.queue, 1, &lists);
+        const result = sdk.queueSignal(self.backend.queue, self.fence.?, 1);
+        if (result < 0) {
+            const removed = sdk.getDeviceRemovedReason(self.backend.device);
+            // A healthy queue which cannot signal provides no safe completion
+            // proof. Never free possibly live GPU objects on that fatal path.
+            if (removed >= 0) @panic("D3D12 queue cannot signal completion without device removal");
+            core.recordLoss(removed);
+            return false;
+        }
+        return true;
+    }
+    fn poll(task: *@import("../../readback_task.zig").Task, wait: bool) error{ReadFailed}!bool {
+        const self: *NativeRead = @alignCast(@fieldParentPtr("task", task));
+        var completed = sdk.fenceCompletedValue(self.fence.?);
+        if (completed == std.math.maxInt(u64)) {
+            core.recordLoss(sdk.getDeviceRemovedReason(self.backend.device));
+            return error.ReadFailed;
+        }
+        if (completed < 1 and wait) {
+            self.event = sdk.createEvent();
+            memory.waitFence(self.fence.?, self.event, 1);
+            completed = sdk.fenceCompletedValue(self.fence.?);
+        }
+        if (completed == std.math.maxInt(u64)) {
+            core.recordLoss(sdk.getDeviceRemovedReason(self.backend.device));
+            return error.ReadFailed;
+        }
+        if (completed < 1) return false;
+        if (task.refs == 1) return true;
+        var mapped: ?*anyopaque = null;
+        if (sdk.resourceMap(self.buffer.?, 0, &mapped) < 0 or mapped == null) return error.ReadFailed;
+        defer sdk.resourceUnmap(self.buffer.?, 0);
+        const source: [*]const u8 = @ptrCast(mapped.?);
+        if (self.row_bytes == 0) {
+            @memcpy(task.data, source[0..task.data.len]);
+        } else for (0..self.slices) |slice| for (0..self.rows) |row| {
+            const from = slice * self.source_stride + row * self.source_pitch;
+            const to = slice * self.target_slice + row * self.target_row;
+            @memcpy(task.data[to..][0..self.row_bytes], source[from..][0..self.row_bytes]);
+        };
+        return true;
+    }
+    fn destroyResources(self: *NativeRead) void {
+        sdk.release(self.list);
+        sdk.release(self.allocator);
+        sdk.release(self.buffer);
+        sdk.release(self.fence);
+        if (self.event) |event| sdk.closeEvent(event);
+        self.task.allocator.destroy(self);
+    }
+    fn destroy(task: *@import("../../readback_task.zig").Task) void {
+        const self: *NativeRead = @alignCast(@fieldParentPtr("task", task));
+        task.allocator.free(task.data);
+        self.destroyResources();
+    }
+};
+pub fn requestBufferRead(self: *Backend, buffer: *core.Buffer, offset: usize, out: []u8) ?*@import("../../readback_task.zig").Task {
+    self.submitFrame();
+    const read = NativeRead.create(self, out.len, out) orelse return null;
+    var success = false;
+    defer if (!success) read.destroyResources();
+    const payload = &buffer.native.d3d12;
+    useState(read.list.?, payload.resource.?, &payload.state, k.state_copy_source);
+    sdk.copyBufferRegion(read.list.?, read.buffer, 0, payload.resource, offset, out.len);
+    if (!read.submit()) return null;
+    success = true;
+    return &read.task;
+}
+pub fn requestImageRead(self: *Backend, image: *core.Image, region: *const core.ReadRegion, out: []u8) ?*@import("../../readback_task.zig").Task {
+    self.submitFrame();
+    const plan = layout(self, image.desc.pixel_format, @intCast(region.width), @intCast(region.height)) orelse return null;
+    const read = NativeRead.create(self, plan.stride * region.num_slices, out) orelse return null;
+    var success = false;
+    defer if (!success) read.destroyResources();
+    read.row_bytes = plan.row_bytes;
+    read.rows = region.height;
+    read.slices = region.num_slices;
+    read.source_pitch = plan.pitch;
+    read.source_stride = plan.stride;
+    read.target_row = region.bytes_per_row;
+    read.target_slice = region.bytes_per_slice;
+    const payload = &image.native.d3d12;
+    useState(read.list.?, payload.resource.?, &payload.state, k.state_copy_source);
+    const is3d = image.desc.type == .@"3d";
+    for (0..region.num_slices) |slice| {
+        const dst: sdk.TextureCopyLocation = .{ .resource = read.buffer, .type = k.texture_copy_placed_footprint, .payload = .{ .placed = .{ .offset = slice * plan.stride, .footprint = .{ .format = convert.baseFormat(image.desc.pixel_format), .width = region.width, .height = region.height, .depth = 1, .row_pitch = @intCast(plan.pitch) } } } };
+        const src: sdk.TextureCopyLocation = .{ .resource = payload.resource, .type = k.texture_copy_subresource_index, .payload = .{ .subresource_index = if (is3d) region.mip_level else region.mip_level + (region.slice + @as(u32, @intCast(slice))) * @as(u32, @intCast(image.cmn.num_mipmaps)) } };
+        const z: u32 = if (is3d) region.slice + @as(u32, @intCast(slice)) else 0;
+        const box: sdk.Box = .{ .left = region.x, .top = region.y, .front = z, .right = region.x + region.width, .bottom = region.y + region.height, .back = z + 1 };
+        sdk.copyTextureRegion(read.list.?, &dst, 0, 0, 0, &src, &box);
+    }
+    if (!read.submit()) return null;
+    success = true;
+    return &read.task;
 }

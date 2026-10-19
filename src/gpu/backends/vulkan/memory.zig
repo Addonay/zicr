@@ -2,6 +2,7 @@
 //! staging copies and streams, the uniform data system and the descriptor
 //! buffer, sokol_gfx.h:21254-22195.
 const std = @import("std");
+const observe = @import("result.zig").observe;
 const t = @import("../../types.zig");
 const e = @import("../../enums.zig");
 const core = @import("../../core.zig");
@@ -32,6 +33,7 @@ pub const MemType = enum {
     staging_stream,
     uniforms,
     descriptors,
+    staging_readback,
 };
 
 /// Destructors of the delete queue; the object is a raw handle or memory value.
@@ -87,7 +89,9 @@ pub const Track = struct {
     pub fn init(allocator: std.mem.Allocator, num_slots: usize) !Track {
         const slots = try allocator.alloc(u32, num_slots);
         errdefer allocator.free(slots);
-        const occupy = try allocator.alloc(bool, num_slots);
+        // Pool slot zero is reserved; live resources occupy 1...num_slots.
+        // The dense list needs num_slots entries, the indexed bitmap one more.
+        const occupy = try allocator.alloc(bool, num_slots + 1);
         @memset(occupy, false);
         return .{ .slots = slots, .occupy = occupy };
     }
@@ -153,15 +157,21 @@ pub fn setObjectLabel(self: *Backend, obj_type: i32, handle: u64, label: ?[*:0]c
 
 // ---------------------------------------------------------------- device memory
 
-fn findMemoryTypeIndex(self: *Backend, type_filter: u32, props: u32) ?u32 {
+fn chooseMemoryType(mem_props: *const sdk.PhysicalDeviceMemoryProperties, type_filter: u32, required: u32, preferred: u32) ?u32 {
+    var fallback: ?u32 = null;
+    for (0..mem_props.memoryTypeCount) |i| {
+        const flags = mem_props.memoryTypes[i].propertyFlags;
+        if (type_filter & (@as(u32, 1) << @intCast(i)) == 0 or flags & required != required) continue;
+        if (preferred == 0 or flags & preferred == preferred) return @intCast(i);
+        if (fallback == null) fallback = @intCast(i);
+    }
+    return fallback;
+}
+
+fn findMemoryTypeIndex(self: *Backend, type_filter: u32, required: u32, preferred: u32) ?u32 {
     var mem_props: sdk.PhysicalDeviceMemoryProperties = std.mem.zeroes(sdk.PhysicalDeviceMemoryProperties);
     self.fns.instance.vkGetPhysicalDeviceMemoryProperties(self.phys_dev, &mem_props);
-    for (0..mem_props.memoryTypeCount) |i| {
-        if ((type_filter & (@as(u32, 1) << @intCast(i))) != 0 and (mem_props.memoryTypes[i].propertyFlags & props) == props) {
-            return @intCast(i);
-        }
-    }
-    return null;
+    return chooseMemoryType(&mem_props, type_filter, required, preferred);
 }
 
 /// Allocates device memory for a resource; returns 0 (after logging) on failure.
@@ -174,13 +184,17 @@ pub fn allocDeviceMemory(self: *Backend, mem_type: MemType, mem_reqs: *const sdk
             prop_flags = sdk.MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
             alloc_flags = sdk.MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
         },
-        .staging_copy, .staging_stream => prop_flags = sdk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | sdk.MEMORY_PROPERTY_HOST_COHERENT_BIT,
+        .staging_copy, .staging_stream, .staging_readback => prop_flags = sdk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | sdk.MEMORY_PROPERTY_HOST_COHERENT_BIT,
         .uniforms, .descriptors => {
             prop_flags = sdk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | sdk.MEMORY_PROPERTY_HOST_COHERENT_BIT;
             alloc_flags = sdk.MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
         },
     }
-    const mem_type_index = findMemoryTypeIndex(self, mem_reqs.memoryTypeBits, prop_flags) orelse {
+    // Upload staging favors the first coherent type (often write-combined).
+    // Readback prefers CPU-cached memory, but never drops the coherence contract
+    // when falling back: these readers do not issue non-coherent invalidations.
+    const preferred: u32 = if (mem_type == .staging_readback) sdk.MEMORY_PROPERTY_HOST_CACHED_BIT else 0;
+    const mem_type_index = findMemoryTypeIndex(self, mem_reqs.memoryTypeBits, prop_flags, preferred) orelse {
         core.logError(.vulkan_alloc_device_memory_no_suitable_memory_type);
         return 0;
     };
@@ -197,7 +211,7 @@ pub fn allocDeviceMemory(self: *Backend, mem_type: MemType, mem_reqs: *const sdk
         .memoryTypeIndex = mem_type_index,
     };
     var vk_dev_mem: sdk.DeviceMemory = 0;
-    const r = self.fns.device.vkAllocateMemory(self.dev, &alloc_info, null, &vk_dev_mem);
+    const r = observe(self.fns.device.vkAllocateMemory(self.dev, &alloc_info, null, &vk_dev_mem));
     core.statsInc("vk.num_allocate_memory");
     core.statsAdd("vk.size_allocate_memory", @intCast(mem_reqs.size));
     if (r != sdk.SUCCESS) {
@@ -246,6 +260,7 @@ pub fn createDeleteQueues(self: *Backend, desc: *const t.Desc) !void {
         2 * desc.pipeline_pool_size +
         1 * desc.view_pool_size +
         256);
+    self.delete_queue_budget = num_items;
     for (&self.frame.slots) |*slot| {
         slot.delete_queue.items = try self.allocator.alloc(DeleteItem, num_items);
         slot.delete_queue.index = 0;
@@ -285,7 +300,25 @@ fn destroyObject(self: *Backend, item: DeleteItem) void {
 
 /// Destroys the objects of the current frame slot that are no longer in flight.
 pub fn deleteQueueCollect(self: *Backend) void {
+    // Private readback submissions follow the frame fence. That older fence
+    // does not prove their source resources are idle. Retain retirements until
+    // the independently fenced tasks have completed (or confirmed removal).
+    if (core.state().readbacks.items.len != 0) return;
     deleteQueueDestroyItems(self, &self.frame.slots[self.frame_slot].delete_queue);
+}
+
+/// Grow before creating resources, never while destroying objects which might
+/// still be referenced by an open command buffer. Each live pool slot has spare
+/// retirement capacity; unbounded churn fails creation safely on allocator OOM.
+pub fn reserveDeleteQueue(self: *Backend) bool {
+    const queue = &self.frame.slots[self.frame_slot].delete_queue;
+    if (queue.items.len - queue.index >= self.delete_queue_budget) return true;
+    const needed = @max(queue.index + self.delete_queue_budget, queue.items.len + queue.items.len / 2 + 64);
+    queue.items = self.allocator.realloc(queue.items, needed) catch {
+        core.logError(.malloc_failed);
+        return false;
+    };
+    return true;
 }
 
 /// Defers destruction of an object until the in-flight frames are done.
@@ -335,7 +368,7 @@ pub fn sharedBufferInit(self: *Backend, shbuf: *SharedBuffer, size: u32, alignme
             .queueFamilyIndexCount = 0,
             .pQueueFamilyIndices = null,
         };
-        if (self.fns.device.vkCreateBuffer(self.dev, &create_info, null, &slot.buf) != sdk.SUCCESS) {
+        if (observe(self.fns.device.vkCreateBuffer(self.dev, &create_info, null, &slot.buf)) != sdk.SUCCESS) {
             core.logPanic(.vulkan_create_shared_buffer_failed);
         }
         setObjectLabel(self, sdk.OBJECT_TYPE_BUFFER, slot.buf, label);
@@ -344,7 +377,7 @@ pub fn sharedBufferInit(self: *Backend, shbuf: *SharedBuffer, size: u32, alignme
         self.fns.device.vkGetBufferMemoryRequirements(self.dev, slot.buf, &reqs);
         slot.mem = allocDeviceMemory(self, mem_type, &reqs);
         if (slot.mem == 0) core.logPanic(.vulkan_allocate_shared_buffer_memory_failed);
-        if (self.fns.device.vkBindBufferMemory(self.dev, slot.buf, slot.mem, 0) != sdk.SUCCESS) {
+        if (observe(self.fns.device.vkBindBufferMemory(self.dev, slot.buf, slot.mem, 0)) != sdk.SUCCESS) {
             core.logPanic(.vulkan_bind_shared_buffer_memory_failed);
         }
         if (want_device_address) {
@@ -357,7 +390,7 @@ pub fn sharedBufferInit(self: *Backend, shbuf: *SharedBuffer, size: u32, alignme
             std.debug.assert(slot.dev_addr != 0);
         }
         var mem_ptr: ?*anyopaque = null;
-        if (self.fns.device.vkMapMemory(self.dev, slot.mem, 0, sdk.WHOLE_SIZE, 0, &mem_ptr) != sdk.SUCCESS) {
+        if (observe(self.fns.device.vkMapMemory(self.dev, slot.mem, 0, sdk.WHOLE_SIZE, 0, &mem_ptr)) != sdk.SUCCESS) {
             core.logPanic(.vulkan_map_shared_buffer_memory_failed);
         }
         slot.mem_ptr = @ptrCast(mem_ptr);
@@ -424,6 +457,77 @@ pub fn sharedBufferMemcpy(shbuf: *SharedBuffer, src: [*]const u8, num_bytes: u32
     return offset;
 }
 
+// ---------------------------------------------------------------- initial upload arena
+
+/// Mapped transfer-source chunks owned by one in-flight frame. Reuse is only
+/// allowed after its fence; large uploads grow by another chunk rather than
+/// submitting and waiting for every resource or image row.
+pub const UploadArena = struct {
+    chunks: std.ArrayList(Chunk) = .empty,
+    cursor: usize = 0,
+    const Chunk = struct { buffer: sdk.Buffer, memory: sdk.DeviceMemory, mapped: [*]u8, size: usize, used: usize = 0 };
+    pub const Range = struct { buffer: sdk.Buffer, offset: u64, bytes: []u8 };
+
+    fn discardChunk(backend: *Backend, chunk: Chunk) void {
+        backend.fns.device.vkUnmapMemory(backend.dev, chunk.memory);
+        backend.fns.device.vkDestroyBuffer(backend.dev, chunk.buffer, null);
+        freeDeviceMemory(backend, chunk.memory);
+    }
+    /// Called only after the frame fence. Cache one normal-sized chunk, so an
+    /// exceptional asset-loading burst does not retain its peak staging memory.
+    pub fn reset(self: *UploadArena, backend: *Backend) void {
+        var cached: ?Chunk = null;
+        for (self.chunks.items) |chunk| {
+            if (cached == null and chunk.size <= backend.stage.copy.size) {
+                cached = chunk;
+                cached.?.used = 0;
+            } else discardChunk(backend, chunk);
+        }
+        self.chunks.clearRetainingCapacity();
+        if (cached) |chunk| self.chunks.appendAssumeCapacity(chunk);
+        self.cursor = 0;
+    }
+    pub fn deinit(self: *UploadArena, backend: *Backend) void {
+        for (self.chunks.items) |chunk| discardChunk(backend, chunk);
+        self.chunks.deinit(backend.allocator);
+        self.* = .{};
+    }
+    pub fn alloc(self: *UploadArena, backend: *Backend, size: usize) ?Range {
+        while (self.cursor < self.chunks.items.len) : (self.cursor += 1) {
+            const chunk = &self.chunks.items[self.cursor];
+            const offset = std.mem.alignForward(usize, chunk.used, 16);
+            if (offset > chunk.size or size > chunk.size - offset) continue;
+            chunk.used = offset + size;
+            return .{ .buffer = chunk.buffer, .offset = offset, .bytes = chunk.mapped[offset..][0..size] };
+        }
+        self.chunks.ensureUnusedCapacity(backend.allocator, 1) catch {
+            core.logError(.malloc_failed);
+            return null;
+        };
+        const capacity = @max(size, backend.stage.copy.size);
+        const info: sdk.BufferCreateInfo = .{ .sType = sdk.STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = capacity, .usage = sdk.BUFFER_USAGE_TRANSFER_SRC_BIT, .sharingMode = sdk.SHARING_MODE_EXCLUSIVE };
+        var buffer: sdk.Buffer = 0;
+        const d = &backend.fns.device;
+        if (observe(d.vkCreateBuffer(backend.dev, &info, null, &buffer)) != sdk.SUCCESS) return null;
+        var keep_buffer = false;
+        defer if (!keep_buffer) d.vkDestroyBuffer(backend.dev, buffer, null);
+        var requirements: sdk.MemoryRequirements = undefined;
+        d.vkGetBufferMemoryRequirements(backend.dev, buffer, &requirements);
+        const allocation = allocDeviceMemory(backend, .staging_copy, &requirements);
+        if (allocation == 0) return null;
+        var keep_memory = false;
+        defer if (!keep_memory) freeDeviceMemory(backend, allocation);
+        if (observe(d.vkBindBufferMemory(backend.dev, buffer, allocation, 0)) != sdk.SUCCESS) return null;
+        var pointer: ?*anyopaque = null;
+        if (observe(d.vkMapMemory(backend.dev, allocation, 0, capacity, 0, &pointer)) != sdk.SUCCESS or pointer == null) return null;
+        const mapped: [*]u8 = @ptrCast(pointer.?);
+        self.chunks.appendAssumeCapacity(.{ .buffer = buffer, .memory = allocation, .mapped = mapped, .size = capacity, .used = size });
+        keep_buffer = true;
+        keep_memory = true;
+        return .{ .buffer = buffer, .offset = 0, .bytes = mapped[0..size] };
+    }
+};
+
 // ---------------------------------------------------------------- copy staging
 
 pub fn stagingCopyInit(self: *Backend, desc: *const t.Desc) !void {
@@ -434,7 +538,7 @@ pub fn stagingCopyInit(self: *Backend, desc: *const t.Desc) !void {
         .flags = sdk.COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT | sdk.COMMAND_POOL_CREATE_TRANSIENT_BIT,
         .queueFamilyIndex = self.queue_family_index,
     };
-    if (self.fns.device.vkCreateCommandPool(self.dev, &pool_info, null, &self.stage.copy.cmd_pool) != sdk.SUCCESS) return error.VulkanInitFailed;
+    if (observe(self.fns.device.vkCreateCommandPool(self.dev, &pool_info, null, &self.stage.copy.cmd_pool)) != sdk.SUCCESS) return error.VulkanInitFailed;
     setObjectLabel(self, sdk.OBJECT_TYPE_COMMAND_POOL, self.stage.copy.cmd_pool, "copy-staging cmd pool");
 
     const alloc_info: sdk.CommandBufferAllocateInfo = .{
@@ -444,39 +548,13 @@ pub fn stagingCopyInit(self: *Backend, desc: *const t.Desc) !void {
         .level = sdk.COMMAND_BUFFER_LEVEL_PRIMARY,
         .commandBufferCount = 1,
     };
-    if (self.fns.device.vkAllocateCommandBuffers(self.dev, &alloc_info, &self.stage.copy.cmd_buf) != sdk.SUCCESS) return error.VulkanInitFailed;
+    if (observe(self.fns.device.vkAllocateCommandBuffers(self.dev, &alloc_info, &self.stage.copy.cmd_buf)) != sdk.SUCCESS) return error.VulkanInitFailed;
     setObjectLabel(self, sdk.OBJECT_TYPE_COMMAND_BUFFER, @intFromPtr(self.stage.copy.cmd_buf), "copy-staging cmd buffer");
 
     self.stage.copy.size = @intCast(desc.vulkan.copy_staging_buffer_size);
-    const buf_info: sdk.BufferCreateInfo = .{
-        .sType = sdk.STRUCTURE_TYPE_BUFFER_CREATE_INFO,
-        .pNext = null,
-        .flags = 0,
-        .size = self.stage.copy.size,
-        .usage = sdk.BUFFER_USAGE_TRANSFER_SRC_BIT,
-        .sharingMode = sdk.SHARING_MODE_EXCLUSIVE,
-        .queueFamilyIndexCount = 0,
-        .pQueueFamilyIndices = null,
-    };
-    if (self.fns.device.vkCreateBuffer(self.dev, &buf_info, null, &self.stage.copy.buf) != sdk.SUCCESS) {
-        core.logPanic(.vulkan_staging_create_buffer_failed);
-    }
-    setObjectLabel(self, sdk.OBJECT_TYPE_BUFFER, self.stage.copy.buf, "copy-staging staging buffer");
-
-    var reqs: sdk.MemoryRequirements = undefined;
-    self.fns.device.vkGetBufferMemoryRequirements(self.dev, self.stage.copy.buf, &reqs);
-    self.stage.copy.mem = allocDeviceMemory(self, .staging_copy, &reqs);
-    if (self.stage.copy.mem == 0) core.logPanic(.vulkan_staging_allocate_memory_failed);
-    if (self.fns.device.vkBindBufferMemory(self.dev, self.stage.copy.buf, self.stage.copy.mem, 0) != sdk.SUCCESS) {
-        core.logPanic(.vulkan_staging_bind_buffer_memory_failed);
-    }
 }
 
 pub fn stagingCopyDiscard(self: *Backend) void {
-    freeDeviceMemory(self, self.stage.copy.mem);
-    self.stage.copy.mem = 0;
-    self.fns.device.vkDestroyBuffer(self.dev, self.stage.copy.buf, null);
-    self.stage.copy.buf = 0;
     self.fns.device.vkDestroyCommandPool(self.dev, self.stage.copy.cmd_pool, null);
     self.stage.copy.cmd_pool = 0;
     self.stage.copy.cmd_buf = null;
@@ -491,14 +569,20 @@ pub fn stagingCopyBegin(self: *Backend) sdk.CommandBuffer {
         .flags = sdk.COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
         .pInheritanceInfo = null,
     };
-    const r = self.fns.device.vkBeginCommandBuffer(cmd_buf, &begin_info);
-    std.debug.assert(r == sdk.SUCCESS);
+    const r = observe(self.fns.device.vkBeginCommandBuffer(cmd_buf, &begin_info));
+    if (r != sdk.SUCCESS) {
+        core.logError(.vulkan_transfer_failed);
+        return null;
+    }
     return cmd_buf;
 }
 
 /// Submits the copy command buffer and waits for the queue to become idle.
-pub fn stagingCopyEnd(self: *Backend, cmd_buf: sdk.CommandBuffer) void {
-    _ = self.fns.device.vkEndCommandBuffer(cmd_buf);
+pub fn stagingCopyEnd(self: *Backend, cmd_buf: sdk.CommandBuffer) bool {
+    if (observe(self.fns.device.vkEndCommandBuffer(cmd_buf)) != sdk.SUCCESS) {
+        core.logError(.vulkan_transfer_failed);
+        return false;
+    }
     var cmd = cmd_buf;
     const submit_info: sdk.SubmitInfo = .{
         .sType = sdk.STRUCTURE_TYPE_SUBMIT_INFO,
@@ -511,59 +595,38 @@ pub fn stagingCopyEnd(self: *Backend, cmd_buf: sdk.CommandBuffer) void {
         .signalSemaphoreCount = 0,
         .pSignalSemaphores = null,
     };
-    var r = self.fns.device.vkQueueSubmit(self.queue, 1, @ptrCast(&submit_info), 0);
-    std.debug.assert(r == sdk.SUCCESS);
-    r = self.fns.device.vkQueueWaitIdle(self.queue);
-    std.debug.assert(r == sdk.SUCCESS);
-    r = self.fns.device.vkResetCommandBuffer(cmd_buf, 0);
-    std.debug.assert(r == sdk.SUCCESS);
+    core.statsInc("vk.num_queue_submits");
+    var r = observe(self.fns.device.vkQueueSubmit(self.queue, 1, @ptrCast(&submit_info), 0));
+    if (r != sdk.SUCCESS) {
+        core.logError(.vulkan_transfer_failed);
+        return false;
+    }
+    core.statsInc("vk.num_queue_wait_idle");
+    r = observe(self.fns.device.vkQueueWaitIdle(self.queue));
+    if (r != sdk.SUCCESS) {
+        core.logError(.vulkan_transfer_failed);
+        return false;
+    }
+    r = observe(self.fns.device.vkResetCommandBuffer(cmd_buf, 0));
+    if (r != sdk.SUCCESS) {
+        core.logError(.vulkan_transfer_failed);
+        return false;
+    }
+    return true;
 }
 
-fn stagingMapMemcpyUnmap(self: *Backend, mem: sdk.DeviceMemory, src: [*]const u8, num_bytes: usize) void {
-    var dst_ptr: ?*anyopaque = null;
-    const r = self.fns.device.vkMapMemory(self.dev, mem, 0, sdk.WHOLE_SIZE, 0, &dst_ptr);
-    std.debug.assert(r == sdk.SUCCESS and dst_ptr != null);
-    const dst: [*]u8 = @ptrCast(dst_ptr.?);
-    @memcpy(dst[0..num_bytes], src[0..num_bytes]);
-    self.fns.device.vkUnmapMemory(self.dev, mem);
-}
-
-/// Blocking buffer update through the copy staging buffer (sokol_gfx.h:21695).
-pub fn stagingCopyBufferData(self: *Backend, buf: *core.Buffer, src: *const t.Range, src_offset: usize, dst_offset: usize, copy_size: usize, initial_wait: bool) void {
-    std.debug.assert(copy_size > 0);
-    std.debug.assert(src.ptr != null and src.size > 0);
-    std.debug.assert(src_offset + copy_size <= src.size);
-    std.debug.assert(dst_offset + copy_size <= buf.cmn.size);
-    // an initial wait is only needed for updating existing resources
-    if (initial_wait) {
-        _ = self.fns.device.vkQueueWaitIdle(self.queue);
-    }
-    const stage_mem = self.stage.copy.mem;
-    const src_buf = self.stage.copy.buf;
-    const dst_buf = buf.native.vulkan.buf;
-    var src_ptr: [*]const u8 = @as([*]const u8, @ptrCast(src.ptr.?)) + src_offset;
-    const dst_size: usize = self.stage.copy.size;
-    var bytes_remaining = copy_size;
-    var region: sdk.BufferCopy = .{ .srcOffset = 0, .dstOffset = dst_offset, .size = 0 };
-    while (bytes_remaining > 0) {
-        var bytes_to_copy: usize = undefined;
-        if (bytes_remaining > dst_size) {
-            bytes_to_copy = dst_size;
-            bytes_remaining -= dst_size;
-        } else {
-            bytes_to_copy = bytes_remaining;
-            bytes_remaining = 0;
-        }
-        region.size = bytes_to_copy;
-        stagingMapMemcpyUnmap(self, stage_mem, src_ptr, bytes_to_copy);
-        const cmd_buf = stagingCopyBegin(self);
-        self.fns.device.vkCmdCopyBuffer(cmd_buf, src_buf, dst_buf, 1, @ptrCast(&region));
-        core.statsInc("vk.num_cmd_copy_buffer");
-        stagingCopyEnd(self, cmd_buf);
-        src_ptr += bytes_to_copy;
-        region.dstOffset += bytes_to_copy;
-    }
-    buf.native.vulkan.cur_access = barrier.defaultBufferAccessMask(buf.cmn.usage);
+/// Copies initial/unsealed CPU buffer bytes into this frame's upload batch.
+pub fn stagingCopyBufferData(self: *Backend, buf: *core.Buffer, src: *const t.Range, src_offset: usize, dst_offset: usize, copy_size: usize) bool {
+    const command = self.uploadCommands() orelse return false;
+    const upload = self.frame.slots[self.frame_slot].uploads.alloc(self, copy_size) orelse return false;
+    const source: [*]const u8 = @ptrCast(src.ptr.?);
+    @memcpy(upload.bytes, source[src_offset..][0..copy_size]);
+    const region: sdk.BufferCopy = .{ .srcOffset = upload.offset, .dstOffset = dst_offset, .size = copy_size };
+    barrier.bufferBarrier(&self.fns.device, command, buf, barrier.copy_dst);
+    self.fns.device.vkCmdCopyBuffer(command, upload.buffer, buf.native.vulkan.buf, 1, @ptrCast(&region));
+    barrier.bufferBarrier(&self.fns.device, command, buf, barrier.defaultBufferAccessMask(buf.cmn.usage));
+    core.statsInc("vk.num_cmd_copy_buffer");
+    return true;
 }
 
 pub fn initVkImageStagingStructs(img: *const core.Image, vk_buf: sdk.Buffer, region: *sdk.BufferImageCopy2, copy_info: *sdk.CopyBufferToImageInfo2) void {
@@ -607,69 +670,41 @@ pub const MipRegion = struct {
     num_slices: i32,
 };
 
-/// Blocking copy of one mip level through the copy staging buffer (sokol_gfx.h:21765).
-pub fn stagingCopyMiplevelData(self: *Backend, img: *core.Image, src: MipSource, reg: MipRegion, initial_wait: bool) void {
-    std.debug.assert(img.native.vulkan.img != 0);
-    if (initial_wait) _ = self.fns.device.vkQueueWaitIdle(self.queue);
-    const mem = self.stage.copy.mem;
+/// Batches one mip/region upload with its original row and slice layout.
+pub fn stagingCopyMiplevelData(self: *Backend, img: *core.Image, src: MipSource, reg: MipRegion) bool {
+    const command = self.uploadCommands() orelse return false;
+    const size = formats.imageCopySize(img.cmn.pixel_format, src.bytes_per_row, src.bytes_per_slice, reg.width, reg.height, reg.num_slices);
+    const upload = self.frame.slots[self.frame_slot].uploads.alloc(self, size) orelse return false;
+    @memcpy(upload.bytes, (src.ptr + src.offset)[0..size]);
     var region: sdk.BufferImageCopy2 = undefined;
-    var copy_info: sdk.CopyBufferToImageInfo2 = undefined;
-    initVkImageStagingStructs(img, self.stage.copy.buf, &region, &copy_info);
-    const block_dim = formats.blockDimension(img.cmn.pixel_format);
-    const block_bytesize = formats.blockSize(img.cmn.pixel_format);
-    region.bufferRowLength = @intCast(@divTrunc(src.bytes_per_row, block_bytesize) * block_dim);
-    region.bufferImageHeight = @intCast(@divTrunc(src.bytes_per_slice, src.bytes_per_row) * block_dim);
+    var copy: sdk.CopyBufferToImageInfo2 = undefined;
+    initVkImageStagingStructs(img, upload.buffer, &region, &copy);
+    const block = formats.blockDimension(img.cmn.pixel_format);
+    const bytes = formats.blockSize(img.cmn.pixel_format);
+    region.bufferOffset = upload.offset;
+    region.bufferRowLength = @intCast(@divTrunc(src.bytes_per_row, bytes) * block);
+    region.bufferImageHeight = @intCast(@divTrunc(src.bytes_per_slice, src.bytes_per_row) * block);
     region.imageSubresource.mipLevel = @intCast(reg.mip_level);
     region.imageOffset.x = reg.x;
+    region.imageOffset.y = reg.y;
     region.imageExtent.width = @intCast(reg.width);
-
-    // NOTE: each array and depth slice is copied individually, this simplifies
-    // copying through a smallish staging buffer which may be smaller than a slice
-    const max_rows: i32 = @intCast(@divTrunc(self.stage.copy.size, @as(u32, @intCast(src.bytes_per_row))));
-    if (max_rows == 0) {
-        core.logError(.vulkan_staging_image_row_pitch_greater_staging_buffer);
-        return;
+    region.imageExtent.height = @intCast(reg.height);
+    if (img.cmn.type == .@"3d") {
+        region.imageOffset.z = reg.slice;
+        region.imageExtent.depth = @intCast(reg.num_slices);
+    } else {
+        region.imageSubresource.baseArrayLayer = @intCast(reg.slice);
+        region.imageSubresource.layerCount = @intCast(reg.num_slices);
     }
-    // actual number of slice-rows to copy (cannot use bytes_per_slice, the source may have gaps)
-    const num_rows = formats.numRows(img.cmn.pixel_format, reg.height);
-    var i: i32 = 0;
-    while (i < reg.num_slices) : (i += 1) {
-        var cur_ptr: [*]const u8 = src.ptr + src.offset + @as(usize, @intCast(i)) * @as(usize, @intCast(src.bytes_per_slice));
-        const cur_slice = i + reg.slice;
-        if (img.cmn.type == .@"3d") {
-            region.imageOffset.z = cur_slice;
-        } else {
-            region.imageSubresource.baseArrayLayer = @intCast(cur_slice);
-        }
-        var rows_remaining = num_rows;
-        var cur_row: i32 = 0;
-        while (rows_remaining > 0) {
-            var rows_to_copy: i32 = undefined;
-            if (rows_remaining > max_rows) {
-                rows_to_copy = max_rows;
-                rows_remaining -= max_rows;
-            } else {
-                rows_to_copy = rows_remaining;
-                rows_remaining = 0;
-            }
-            const bytes_to_copy: usize = @intCast(rows_to_copy * src.bytes_per_row);
-            stagingMapMemcpyUnmap(self, mem, cur_ptr, bytes_to_copy);
-            cur_ptr += bytes_to_copy;
-            const cmd_buf = stagingCopyBegin(self);
-            barrier.imageBarrier(&self.fns.device, cmd_buf, img, barrier.copy_dst);
-            region.imageOffset.y = reg.y + cur_row * block_dim;
-            region.imageExtent.height = @intCast(@min(reg.height, rows_to_copy * block_dim));
-            self.fns.device.vkCmdCopyBufferToImage2(cmd_buf, &copy_info);
-            core.statsInc("vk.num_cmd_copy_buffer_to_image");
-            barrier.imageBarrier(&self.fns.device, cmd_buf, img, barrier.defaultImageAccessMask());
-            stagingCopyEnd(self, cmd_buf);
-            cur_row += rows_to_copy;
-        }
-    }
+    barrier.imageBarrier(&self.fns.device, command, img, barrier.copy_dst);
+    self.fns.device.vkCmdCopyBufferToImage2(command, &copy);
+    barrier.imageBarrier(&self.fns.device, command, img, barrier.defaultImageAccessMask());
+    core.statsInc("vk.num_cmd_copy_buffer_to_image");
+    return true;
 }
 
-/// Blocking image update with all mip levels (sokol_gfx.h:21865).
-pub fn stagingCopyImageData(self: *Backend, img: *core.Image, data: *const t.ImageData, initial_wait: bool) void {
+/// Batches every mip level into the current frame upload arena (sokol_gfx.h:21865).
+pub fn stagingCopyImageData(self: *Backend, img: *core.Image, data: *const t.ImageData) bool {
     const fmt = img.cmn.pixel_format;
     var mip_level: i32 = 0;
     while (mip_level < img.cmn.num_mipmaps) : (mip_level += 1) {
@@ -680,7 +715,7 @@ pub fn stagingCopyImageData(self: *Backend, img: *core.Image, data: *const t.Ima
         const mip_depth_or_slices: i32 = if (img.cmn.type == .@"3d") core.miplevelDim(img.cmn.num_slices, mip_level) else img.cmn.num_slices;
         const bytes_per_row = formats.rowPitch(fmt, mip_width, 1);
         const bytes_per_slice = formats.surfacePitch(fmt, mip_width, mip_height, 1);
-        stagingCopyMiplevelData(self, img, .{
+        if (!stagingCopyMiplevelData(self, img, .{
             .ptr = @ptrCast(level.ptr.?),
             .size = level.size,
             .offset = 0,
@@ -694,8 +729,9 @@ pub fn stagingCopyImageData(self: *Backend, img: *core.Image, data: *const t.Ima
             .width = mip_width,
             .height = mip_height,
             .num_slices = mip_depth_or_slices,
-        }, if (mip_level == 0) initial_wait else false);
+        })) return false;
     }
+    return true;
 }
 
 // ---------------------------------------------------------------- streaming staging
@@ -804,6 +840,7 @@ pub fn uniformCopy(self: *Backend, data: *const t.Range) u64 {
 // ---------------------------------------------------------------- descriptor buffer
 
 pub fn bindInit(self: *Backend, desc: *const t.Desc) void {
+    if (!self.use_descriptor_buffer) return;
     std.debug.assert(desc.vulkan.descriptor_buffer_size > 0);
     sharedBufferInit(self, &self.bind, @intCast(desc.vulkan.descriptor_buffer_size), @intCast(self.descriptor_buffer_props.descriptorBufferOffsetAlignment), .descriptors, "shared-descriptor-buffer");
 }
@@ -814,6 +851,10 @@ pub fn bindDiscard(self: *Backend) void {
 
 /// Binds the current frame's descriptor buffer (sokol_gfx.h:22079).
 pub fn bindAfterAcquire(self: *Backend) void {
+    if (!self.use_descriptor_buffer) {
+        @import("descriptor_sets.zig").begin(self);
+        return;
+    }
     sharedBufferAfterAcquire(self, &self.bind);
     std.debug.assert(self.frame.cmd_buf != null and self.bind.cur_buf != 0 and self.bind.cur_dev_addr != 0);
     const bind_info: sdk.DescriptorBufferBindingInfoEXT = .{
@@ -827,4 +868,18 @@ pub fn bindAfterAcquire(self: *Backend) void {
 
 pub fn bindBeforeSubmit(self: *Backend) void {
     sharedBufferBeforeSubmit(&self.bind);
+}
+
+test "readback memory preference preserves coherence and allowed memory types" {
+    var props: sdk.PhysicalDeviceMemoryProperties = .{};
+    props.memoryTypeCount = 2;
+    props.memoryTypes[0].propertyFlags = sdk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | sdk.MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    props.memoryTypes[1].propertyFlags = props.memoryTypes[0].propertyFlags | sdk.MEMORY_PROPERTY_HOST_CACHED_BIT;
+    const required = sdk.MEMORY_PROPERTY_HOST_VISIBLE_BIT | sdk.MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    try std.testing.expectEqual(@as(?u32, 1), chooseMemoryType(&props, 3, required, sdk.MEMORY_PROPERTY_HOST_CACHED_BIT));
+    try std.testing.expectEqual(@as(?u32, 0), chooseMemoryType(&props, 1, required, sdk.MEMORY_PROPERTY_HOST_CACHED_BIT));
+    try std.testing.expectEqual(@as(?u32, 0), chooseMemoryType(&props, 3, required, 0)); // upload policy
+    props.memoryTypes[1].propertyFlags &= ~sdk.MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    try std.testing.expectEqual(@as(?u32, 0), chooseMemoryType(&props, 3, required, sdk.MEMORY_PROPERTY_HOST_CACHED_BIT));
+    try std.testing.expectEqual(@as(?u32, null), chooseMemoryType(&props, 2, required, sdk.MEMORY_PROPERTY_HOST_CACHED_BIT));
 }

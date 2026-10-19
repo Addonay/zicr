@@ -10,21 +10,9 @@ const sdk = @import("sdk.zig");
 const convert = @import("convert.zig");
 const payload = @import("resources.zig");
 
-const map_mode_read: u64 = 1;
-const callback_mode_allow_spontaneous: u32 = 3;
-const map_status_success: u32 = 1;
 const max_map_spins: usize = 1 << 26;
-
-const MapWait = struct {
-    done: bool = false,
-    status: u32 = 0,
-};
-
-fn onMapped(status: u32, _: sdk.StringView, userdata1: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {
-    const wait: *MapWait = @ptrCast(@alignCast(userdata1.?));
-    wait.status = status;
-    @atomicStore(bool, &wait.done, true, .release);
-}
+pub const PendingRead = @import("readback.zig").Pending;
+const ScopeResult = @import("future.zig").ScopeResult;
 
 /// Extra size of the uniform buffer, on top of the requested uniform_buffer_size.
 const max_uniform_update_size: u32 = 1 << 16;
@@ -102,6 +90,12 @@ pub const Backend = struct {
     queue_handle: sdk.Queue,
     /// wgpu-native's wgpuDevicePoll, used to wait for mapping; null if the library lacks it.
     device_poll: ?sdk.DevicePollFn = null,
+    instance: ?sdk.Instance = null,
+    wait_any: ?sdk.InstanceWaitAnyFn = null,
+    wait_timeout_ns: u64 = 0,
+    push_scope: ?sdk.PushErrorScopeFn = null,
+    pop_scope: ?sdk.PopErrorScopeFn = null,
+    scopes: std.ArrayList(*ScopeResult) = .empty,
     limits: sdk.Limits = .{},
     cmd_enc: ?sdk.CommandEncoder = null,
     rpass_enc: ?sdk.RenderPassEncoder = null,
@@ -110,6 +104,7 @@ pub const Backend = struct {
     bindings_cache: BindingsCache = .{},
     bindgroups_cache: BindgroupsCache = .{},
     bindgroups_pool: core.Pool(BindGroup),
+    readbacks: std.ArrayList(*PendingRead) = .empty,
 
     pub fn init(s: *core.State) !Backend {
         const env = s.desc.environment.wgpu;
@@ -128,6 +123,13 @@ pub const Backend = struct {
         if (get_proc_address("wgpuDevicePoll", env.user_data)) |address| {
             self.device_poll = @ptrCast(@alignCast(address));
         }
+        if (env.instance) |instance| {
+            self.instance = fromOpaque(sdk.Instance, instance);
+            self.wait_timeout_ns = env.wait_timeout_ns;
+            if (get_proc_address("wgpuInstanceWaitAny", env.user_data)) |address| self.wait_any = @ptrCast(@alignCast(address));
+        }
+        if (get_proc_address("wgpuDevicePushErrorScope", env.user_data)) |address| self.push_scope = @ptrCast(@alignCast(address));
+        if (get_proc_address("wgpuDevicePopErrorScope", env.user_data)) |address| self.pop_scope = @ptrCast(@alignCast(address));
         self.initCaps(s);
         try self.uniformSystemInit(s.desc.uniform_buffer_size);
         errdefer self.uniformSystemDiscard();
@@ -149,6 +151,10 @@ pub const Backend = struct {
     }
 
     pub fn deinit(self: *Backend) void {
+        self.collectReadbacks(true);
+        self.collectScopes(true);
+        self.scopes.deinit(self.allocator);
+        self.readbacks.deinit(self.allocator);
         self.discardAllBindgroups();
         self.allocator.free(self.bindgroups_cache.items);
         self.bindgroups_cache = .{};
@@ -632,7 +638,7 @@ pub const Backend = struct {
             res.buf = fromOpaque(sdk.Buffer, injected);
             self.procs.wgpuBufferAddRef(res.buf.?);
         } else if (desc.usage.staging_buffer or desc.usage.staging_index_buffer) {
-            res.staging = self.allocator.alloc(u8, wgpu_size) catch return .failed;
+            res.staging = self.allocator.alloc(u8, @intCast(wgpu_size)) catch return .failed;
         } else {
             const map_at_creation = desc.data.ptr != null or buf.cmn.usage.write_unsealed;
             const wgpu_desc: sdk.BufferDescriptor = .{
@@ -647,7 +653,7 @@ pub const Backend = struct {
             };
             if (map_at_creation) {
                 // FIXME: inefficient on WASM
-                const mapped = self.procs.wgpuBufferGetMappedRange(res.buf.?, 0, wgpu_size) orelse unreachable;
+                const mapped = self.procs.wgpuBufferGetMappedRange(res.buf.?, 0, @intCast(wgpu_size)) orelse unreachable;
                 res.mapped_ptr = @ptrCast(mapped);
                 if (desc.data.ptr) |src| {
                     std.debug.assert(desc.data.size <= buf.cmn.size);
@@ -789,6 +795,61 @@ pub const Backend = struct {
         }
     }
 
+    fn pumpFuture(self: *Backend, future: sdk.Future, wait: bool) bool {
+        if (self.device_poll) |poll| {
+            _ = poll(self.dev, @intFromBool(wait), null);
+            return true;
+        }
+        if (self.wait_any) |wait_any| if (self.instance) |instance| {
+            var info: sdk.FutureWaitInfo = .{ .future = future };
+            const result = wait_any(instance, 1, @ptrCast(&info), if (wait) self.wait_timeout_ns else 0);
+            return result == 1 or result == 2;
+        };
+        return false;
+    }
+    fn collectScopes(self: *Backend, wait: bool) void {
+        var i: usize = 0;
+        while (i < self.scopes.items.len) {
+            const scope = self.scopes.items[i];
+            if (wait) while (!scope.finished.load(.acquire)) {
+                _ = self.pumpFuture(scope.future, false);
+                std.atomic.spinLoopHint();
+            };
+            if (!scope.finished.load(.acquire)) {
+                i += 1;
+                continue;
+            }
+            scope.release();
+            _ = self.scopes.swapRemove(i);
+        }
+    }
+    fn beginScope(self: *Backend) !?*ScopeResult {
+        if (@import("builtin").cpu.arch.isWasm() or self.push_scope == null or self.pop_scope == null) return null;
+        if (self.device_poll == null and (self.instance == null or self.wait_any == null or self.wait_timeout_ns == 0)) return null;
+        self.collectScopes(false);
+        try self.scopes.ensureUnusedCapacity(self.allocator, 1);
+        const scope = try self.allocator.create(ScopeResult);
+        scope.* = .{ .allocator = self.allocator };
+        self.scopes.appendAssumeCapacity(scope);
+        self.push_scope.?(self.dev, 1); // validation
+        return scope;
+    }
+    fn endScope(self: *Backend, maybe_scope: ?*ScopeResult) bool {
+        const scope = maybe_scope orelse return true;
+        defer scope.release();
+        _ = scope.refs.fetchAdd(1, .monotonic);
+        scope.future = self.pop_scope.?(self.dev, .{ .callback = ScopeResult.completed, .userdata1 = scope });
+        for (0..max_map_spins) |_| {
+            if (scope.finished.load(.acquire)) {
+                if (scope.status == 1 and scope.error_type == 1) return true;
+                core.log(.wgpu_create_shader_module_failed, .err, &scope.message);
+                return false;
+            }
+            if (!self.pumpFuture(scope.future, true)) return false;
+        }
+        return false;
+    }
+
     fn createShaderFunc(self: *Backend, func: *const t.ShaderFunction, label: ?[*:0]const u8) payload.ShaderFunc {
         var res: payload.ShaderFunc = .{};
         const entry = std.mem.span(func.entry.?);
@@ -804,9 +865,18 @@ pub const Backend = struct {
             .next_in_chain = &wgsl.chain,
             .label = convert.stringView(label),
         };
-        // NOTE: if compilation fails we won't find out in this call, since it always returns a
-        // valid module handle, and the compilation info is only available asynchronously
+        // Native error scopes turn invalid WGSL into a normal creation failure.
+        // Browser creation stays asynchronous and reports errors through its host.
+        const scope = self.beginScope() catch {
+            core.logError(.malloc_failed);
+            return res;
+        };
         res.module = self.procs.wgpuDeviceCreateShaderModule(self.dev, &module_desc);
+        if (!self.endScope(scope)) {
+            self.procs.wgpuShaderModuleRelease(res.module);
+            res.module = null;
+            return res;
+        }
         if (res.module == null) {
             core.logError(.wgpu_create_shader_module_failed);
         }
@@ -1026,7 +1096,12 @@ pub const Backend = struct {
                     .entry_point = shd_res.compute_func.entryView(),
                 },
             };
+            const scope = self.beginScope() catch {
+                core.logError(.malloc_failed);
+                return .failed;
+            };
             res.cpip = self.procs.wgpuDeviceCreateComputePipeline(self.dev, &pip_desc);
+            if (!self.endScope(scope)) return .failed;
             self.procs.wgpuPipelineLayoutRelease(layout);
             if (res.cpip == null) {
                 core.logError(.wgpu_create_compute_pipeline_failed);
@@ -1142,7 +1217,12 @@ pub const Backend = struct {
             }
             pip_desc.fragment = &frag_state;
         }
+        const scope = self.beginScope() catch {
+            core.logError(.malloc_failed);
+            return .failed;
+        };
         res.rpip = self.procs.wgpuDeviceCreateRenderPipeline(self.dev, &pip_desc);
+        if (!self.endScope(scope)) return .failed;
         self.procs.wgpuPipelineLayoutRelease(layout);
         if (res.rpip == null) {
             core.logError(.wgpu_create_render_pipeline_failed);
@@ -1491,48 +1571,62 @@ pub const Backend = struct {
     }
 
     /// Readback (zicr extension): waits for committed GPU work, copies buffer bytes into `out`.
-    pub fn readBuffer(self: *Backend, buf: *core.Buffer, offset: usize, out: []u8) bool {
+    pub fn requestBufferRead(self: *Backend, buf: *core.Buffer, offset: usize, out: []u8) ?*PendingRead {
         const res = switch (buf.native) {
             .wgpu => |*value| value,
-            else => return false,
+            else => return null,
         };
-        if (res.staging) |staging| {
-            if (offset + out.len > staging.len) return false;
-            @memcpy(out, staging[offset..][0..out.len]);
-            return true;
-        }
-        const gpu_buf = res.buf orelse return false;
+        if (res.staging != null) return null;
+        const gpu_buf = res.buf orelse return null;
         // copies need 4-byte aligned offsets and sizes: copy an aligned superset and slice it
         const start = offset & ~@as(usize, 3);
         const end = std.mem.alignForward(usize, offset + out.len, 4);
-        const readback = self.createReadback(end - start) orelse return false;
-        defer self.procs.wgpuBufferRelease(readback);
-        const enc = self.procs.wgpuDeviceCreateCommandEncoder(self.dev, null) orelse return false;
+        const readback = self.createReadback(end - start) orelse return null;
+        const pending = self.newPending(readback, end - start, out) orelse {
+            self.procs.wgpuBufferRelease(readback);
+            return null;
+        };
+        var submitted = false;
+        defer if (!submitted) {
+            pending.data = &.{};
+            pending.release();
+        };
+        const enc = self.procs.wgpuDeviceCreateCommandEncoder(self.dev, null) orelse return null;
         defer self.procs.wgpuCommandEncoderRelease(enc);
         self.procs.wgpuCommandEncoderCopyBufferToBuffer(enc, gpu_buf, start, readback, 0, end - start);
-        if (!self.submitEncoder(enc)) return false;
-        if (!self.awaitMap(readback, end - start)) return false;
-        defer self.procs.wgpuBufferUnmap(readback);
-        const mapped: [*]const u8 = @ptrCast(self.procs.wgpuBufferGetConstMappedRange(readback, 0, end - start) orelse return false);
-        @memcpy(out, mapped[offset - start ..][0..out.len]);
-        return true;
+        if (!self.submitEncoder(enc)) return null;
+        pending.offset = offset - start;
+        submitted = true;
+        pending.tracked = true;
+        _ = pending.refs.fetchAdd(1, .monotonic);
+        self.readbacks.appendAssumeCapacity(pending);
+        pending.start();
+        return pending;
     }
 
     /// Readback (zicr extension): waits for committed GPU work, copies an image region into `out`.
     /// The copy uses 256-byte aligned rows and the rows are repacked into the caller's pitches.
-    pub fn readImage(self: *Backend, img: *core.Image, region: *const core.ReadRegion, out: []u8) bool {
+    pub fn requestImageRead(self: *Backend, img: *core.Image, region: *const core.ReadRegion, out: []u8) ?*PendingRead {
         const tex = switch (img.native) {
-            .wgpu => |value| value.tex orelse return false,
-            else => return false,
+            .wgpu => |value| value.tex orelse return null,
+            else => return null,
         };
         const bpp: usize = @intCast(formats.pixelSize(img.cmn.pixel_format));
         const row_bytes = @as(usize, region.width) * bpp;
         const aligned_row = std.mem.alignForward(usize, row_bytes, 256);
         const slice_bytes = aligned_row * region.height;
         const total = slice_bytes * region.num_slices;
-        const readback = self.createReadback(total) orelse return false;
-        defer self.procs.wgpuBufferRelease(readback);
-        const enc = self.procs.wgpuDeviceCreateCommandEncoder(self.dev, null) orelse return false;
+        const readback = self.createReadback(total) orelse return null;
+        const pending = self.newPending(readback, total, out) orelse {
+            self.procs.wgpuBufferRelease(readback);
+            return null;
+        };
+        var submitted = false;
+        defer if (!submitted) {
+            pending.data = &.{};
+            pending.release();
+        };
+        const enc = self.procs.wgpuDeviceCreateCommandEncoder(self.dev, null) orelse return null;
         defer self.procs.wgpuCommandEncoderRelease(enc);
         const src: sdk.TexelCopyTextureInfo = .{
             .texture = tex,
@@ -1546,18 +1640,91 @@ pub const Backend = struct {
         };
         const extent: sdk.Extent3D = .{ .width = region.width, .height = region.height, .depth_or_array_layers = region.num_slices };
         self.procs.wgpuCommandEncoderCopyTextureToBuffer(enc, &src, &dst, &extent);
-        if (!self.submitEncoder(enc)) return false;
-        if (!self.awaitMap(readback, total)) return false;
-        defer self.procs.wgpuBufferUnmap(readback);
-        const mapped: [*]const u8 = @ptrCast(self.procs.wgpuBufferGetConstMappedRange(readback, 0, total) orelse return false);
-        for (0..region.num_slices) |slice| {
-            for (0..region.height) |row| {
-                const from = slice * slice_bytes + row * aligned_row;
-                const to = slice * region.bytes_per_slice + row * region.bytes_per_row;
-                @memcpy(out[to..][0..row_bytes], mapped[from..][0..row_bytes]);
+        if (!self.submitEncoder(enc)) return null;
+        pending.row_bytes = row_bytes;
+        pending.source_row = aligned_row;
+        pending.source_slice = slice_bytes;
+        pending.target_row = region.bytes_per_row;
+        pending.target_slice = region.bytes_per_slice;
+        pending.rows = region.height;
+        pending.slices = region.num_slices;
+        submitted = true;
+        pending.tracked = true;
+        _ = pending.refs.fetchAdd(1, .monotonic);
+        self.readbacks.appendAssumeCapacity(pending);
+        pending.start();
+        return pending;
+    }
+
+    fn collectReadbacks(self: *Backend, wait: bool) void {
+        var i: usize = 0;
+        while (i < self.readbacks.items.len) {
+            const pending = self.readbacks.items[i];
+            if (wait and !pending.callback_finished.load(.acquire)) {
+                // Unmap cancels an outstanding mapping, including on device loss.
+                self.procs.wgpuBufferUnmap(pending.buffer);
+                if (comptime @import("builtin").cpu.arch.isWasm()) {
+                    // JS callbacks cannot run until we return. The promise owns
+                    // the wasm instance and imports until its callback completes.
+                    pending.tracked = false;
+                } else {
+                    while (!pending.callback_finished.load(.acquire)) {
+                        _ = self.pumpFuture(pending.future, false);
+                        std.atomic.spinLoopHint();
+                    }
+                }
+            } else if (!pending.callback_finished.load(.acquire)) {
+                i += 1;
+                continue;
             }
+            pending.release();
+            _ = self.readbacks.swapRemove(i);
         }
-        return true;
+    }
+
+    fn newPending(self: *Backend, buffer: sdk.Buffer, size: usize, out: []u8) ?*PendingRead {
+        self.collectReadbacks(false);
+        self.readbacks.ensureUnusedCapacity(self.allocator, 1) catch return null;
+        const pending = self.allocator.create(PendingRead) catch return null;
+        pending.* = .{ .allocator = self.allocator, .procs = self.procs, .device = self.dev, .device_poll = self.device_poll, .instance = self.instance, .wait_any = self.wait_any, .wait_timeout_ns = self.wait_timeout_ns, .buffer = buffer, .mapped_size = size, .data = out };
+        return pending;
+    }
+
+    pub fn readBuffer(self: *Backend, buf: *core.Buffer, offset: usize, out: []u8) bool {
+        if (buf.native.wgpu.staging) |data| {
+            @memcpy(out, data[offset..][0..out.len]);
+            return true;
+        }
+        if (comptime @import("builtin").cpu.arch.isWasm()) return false;
+        const pending = self.requestBufferRead(buf, offset, out) orelse return false;
+        pending.owns_data = false;
+        return waitRead(pending);
+    }
+
+    pub fn readImage(self: *Backend, img: *core.Image, region: *const core.ReadRegion, out: []u8) bool {
+        if (comptime @import("builtin").cpu.arch.isWasm()) return false;
+        const pending = self.requestImageRead(img, region, out) orelse return false;
+        pending.owns_data = false;
+        return waitRead(pending);
+    }
+
+    fn waitRead(pending: *PendingRead) bool {
+        defer pending.release();
+        for (0..max_map_spins) |_| {
+            // poll writes directly into the borrowed output, preserving image
+            // padding. A late callback only publishes status; retirement never
+            // polls/copies after this blocking caller has returned.
+            if (pending.poll() catch return false) |_| return true;
+            if (pending.device_poll) |poll| {
+                _ = poll(pending.device, 1, null);
+            } else if (pending.wait_any) |wait_any| {
+                if (pending.wait_timeout_ns == 0) return false;
+                var info: sdk.FutureWaitInfo = .{ .future = pending.future };
+                if (wait_any(pending.instance, 1, @ptrCast(&info), pending.wait_timeout_ns) == 3) return false;
+            } else return false;
+        }
+        // The callback still owns the pending state after a timeout.
+        return false;
     }
 
     fn createReadback(self: *Backend, size: usize) ?sdk.Buffer {
@@ -1572,30 +1739,6 @@ pub const Backend = struct {
         defer self.procs.wgpuCommandBufferRelease(cmd);
         const cmds = [_]?sdk.CommandBuffer{cmd};
         self.procs.wgpuQueueSubmit(self.queue_handle, 1, &cmds[0]);
-        return true;
-    }
-
-    /// Maps a MapRead buffer and waits until the mapping completes. Spontaneous callbacks fire
-    /// on the implementation's own threads, so the wait polls the device when it is available.
-    fn awaitMap(self: *Backend, buf: sdk.Buffer, size: usize) bool {
-        var wait: MapWait = .{};
-        _ = self.procs.wgpuBufferMapAsync(buf, map_mode_read, 0, size, .{
-            .mode = callback_mode_allow_spontaneous,
-            .callback = onMapped,
-            .userdata1 = &wait,
-        });
-        var spins: usize = 0;
-        while (!@atomicLoad(bool, &wait.done, .acquire)) : (spins += 1) {
-            if (spins > max_map_spins) return false;
-            if (self.device_poll) |poll| {
-                _ = poll(self.dev, 1, null);
-            } else {
-                std.atomic.spinLoopHint();
-            }
-        }
-        if (wait.status != map_status_success) {
-            return false;
-        }
         return true;
     }
 

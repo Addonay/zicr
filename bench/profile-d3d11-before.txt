@@ -1,0 +1,44 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 5K of event 'cycles:u'
+# Event count (approx.): 14703470336
+#
+# Overhead  Command          Shared Object              Symbol
+# ........  ...............  .........................  ................................................................................................................................................................................................................................................................
+#
+     5.37%  dxvk-cs          dxvk-d3d11.dll             [.] 0x00000000001ddbc7
+     4.29%  dxvk-cs          libvulkan_radeon.so        [.] radv_CmdDraw
+     3.48%  dxvk-cs          dxvk-d3d11.dll             [.] 0x000000000009f0de
+     2.40%  dxvk-cs          dxvk-d3d11.dll             [.] 0x000000000000d12f
+     2.36%  dxvk-cs          ntdll.so                   [.] __wine_unix_call_dispatcher
+     2.29%  zicr-bench-d3d1  dxvk-d3d11.dll             [.] 0x00000000000108f4
+     2.26%  zicr-bench-d3d1  dxvk-d3d11.dll             [.] 0x0000000000215dff
+     1.80%  zicr-bench-d3d1  [JIT] tid 450556           [.] 0x00000001400af4c6
+     1.60%  zicr-bench-d3d1  [JIT] tid 450556           [.] 0x00000001400af4be
+     1.57%  zicr-bench-d3d1  dxvk-d3d11.dll             [.] 0x000000000021ce0c
+     1.47%  zicr-bench-d3d1  [JIT] tid 450556           [.] 0x00000001400af4b4
+     1.35%  zicr-bench-d3d1  [JIT] tid 450556           [.] 0x00000001400af4aa
+     1.23%  zicr-bench-d3d1  [JIT] tid 450556           [.] 0x00000001400ae4ef
+     1.17%  dxvk-cs          libvulkan_radeon.so        [.] radv_emit_all_graphics_states
+     1.15%  zicr-bench-d3d1  [JIT] tid 450556           [.] 0x00000001400ae4d2
+     1.14%  dxvk-cs          libvulkan_radeon.so        [.] radv_emit_draw_registers
+     1.14%  zicr-bench-d3d1  [JIT] tid 450556           [.] 0x00000001400ae4d8
+     1.13%  zicr-bench-d3d1  [JIT] tid 450556           [.] 0x00000001400ae4de
+     1.13%  zicr-bench-d3d1  dxvk-d3d11.dll             [.] 0x00000000000109b0
+     1.08%  zicr-bench-d3d1  [JIT] tid 450556           [.] 0x00000001400756fb
+     1.06%  zicr-bench-d3d1  [JIT] tid 450556           [.] 0x00000001400ae4c6
+
+
+#
+# (Tip: Save output of perf stat using: perf stat record <target workload>)
+#
+
+Wine maps the PE executable as JIT addresses. llvm-addr2line against the verified
+profile binary resolves 0x1400af4c6 to compiler_rt/memcpy.zig:138 copyBlocks,
+0x1400ae4ef to compiler_rt.zig:649 memset, and 0x1400756fb to gpu/api.zig:821
+applyBindings. Profile executable SHA-256 is the binary_sha256 in
+results/d3d11-wine-2026-10-19-10000.json. Whole-process cycles include DXVK's
+command-processing thread; they are not all zicr's API overhead.

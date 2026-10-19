@@ -1,6 +1,7 @@
 //! Native rendering/compute commands from sokol_gfx.h:12465-13288.
 const std = @import("std");
 const t = @import("../../types.zig");
+const core = @import("../../core.zig");
 const e = @import("../../enums.zig");
 const formats = @import("../../formats.zig");
 const c = @import("constants.zig");
@@ -28,11 +29,11 @@ pub fn Commands(comptime Backend: type) type {
             if (!self.cache.features.compute) return;
             var bits: u32 = 0;
             if (bindings) |bnd| {
-                for (bnd.vertex_buffers) |binding| {
+                for (&bnd.vertex_buffers) |binding| {
                     if (binding) |buffer| takeDirty(&buffer.resource.gpu_dirty, r.Dirty.vertex, c.vertex_attrib_array_barrier_bit, &bits);
                 }
                 if (bnd.index_buffer) |buffer| takeDirty(&buffer.resource.gpu_dirty, r.Dirty.index, c.element_array_barrier_bit, &bits);
-                for (bnd.views) |optional| {
+                for (&bnd.views) |optional| {
                     const view = optional orelse continue;
                     if (view.buffer) |buffer| {
                         takeDirty(&buffer.resource.gpu_dirty, r.Dirty.storage_buffer, c.shader_storage_barrier_bit, &bits);
@@ -53,7 +54,7 @@ pub fn Commands(comptime Backend: type) type {
             }
             // Mark writers only after every alias has been read and cleared.
             if (bindings) |bnd| {
-                for (bnd.views, bnd.shader.desc.views) |optional, required| {
+                for (&bnd.views, &bnd.shader.desc.views) |optional, required| {
                     const view = optional orelse continue;
                     if (view.buffer) |buffer| {
                         if (!required.storage_buffer.readonly) buffer.resource.gpu_dirty = r.Dirty.buffer_all;
@@ -63,7 +64,13 @@ pub fn Commands(comptime Backend: type) type {
         }
 
         pub fn beginPass(self: *Backend, pass: t.Pass, atts: *const r.Attachments) bool {
-            if (pass.compute) return true;
+            if (pass.compute) {
+                // Readback may leave a detached private framebuffer current.
+                // Compute has no attachments; avoid carrying that incomplete
+                // framebuffer into driver dispatch validation.
+                self.cache.driver.bindFramebuffer.?(c.framebuffer, 0);
+                return true;
+            }
             const driver = self.cache.driver;
             const offscreen = !atts.empty();
             if (offscreen) {
@@ -350,7 +357,28 @@ pub fn Commands(comptime Backend: type) type {
             const cache = &self.cache;
             const driver = cache.driver;
             const shader = bnd.shader;
-            for (shader.desc.texture_sampler_pairs, 0..) |pair, i| {
+            if (!cache.features.gl_texture_views) {
+                // BASE_LEVEL/MAX_LEVEL belong to the texture, not the binding.
+                // One image may appear on many units only with the same range.
+                for (&shader.desc.texture_sampler_pairs, 0..) |pair, i| {
+                    if (pair.stage == .none) continue;
+                    const view = bnd.views[pair.view_slot].?;
+                    const image = view.image.?;
+                    for ((&shader.desc.texture_sampler_pairs)[0..i]) |prior| {
+                        if (prior.stage == .none) continue;
+                        const other = bnd.views[prior.view_slot].?;
+                        const other_image = other.image.?;
+                        if (image.resource.ids[@intCast(image.active_slot)] != other_image.resource.ids[@intCast(other_image.active_slot)]) continue;
+                        const a = view.desc.texture.mip_levels;
+                        const b = other.desc.texture.mip_levels;
+                        if (a.base != b.base or a.count != b.count) {
+                            core.logError(.gl_texture_view_mip_alias_conflict);
+                            return false;
+                        }
+                    }
+                }
+            }
+            for (&shader.desc.texture_sampler_pairs, 0..) |pair, i| {
                 if (pair.stage == .none) continue;
                 const unit = shader.resource.texture_slots[i];
                 if (unit < 0) continue;
@@ -359,8 +387,14 @@ pub fn Commands(comptime Backend: type) type {
                 const sampler = bnd.samplers[pair.sampler_slot].?;
                 const texture = if (cache.features.gl_texture_views) view.resource.texture_views[@intCast(image.active_slot)] else image.resource.ids[@intCast(image.active_slot)];
                 cache.bindTexture(@intCast(unit), image.resource.target, texture, sampler.id);
+                if (!cache.features.gl_texture_views and image.desc.sample_count == 1) {
+                    cache.activeTexture(c.texture0 + @as(u32, @intCast(unit)));
+                    const range = view.desc.texture.mip_levels;
+                    driver.texParameteri.?(image.resource.target, c.texture_base_level, range.base);
+                    driver.texParameteri.?(image.resource.target, c.texture_max_level, range.base + range.count - 1);
+                }
             }
-            for (shader.desc.views, bnd.views, 0..) |required, optional, i| {
+            for (&shader.desc.views, &bnd.views, 0..) |required, optional, i| {
                 if (required.texture.stage == .none and required.storage_buffer.stage == .none and required.storage_image.stage == .none) continue;
                 const view = optional.?;
                 if (view.buffer) |buffer| {
@@ -417,7 +451,7 @@ pub fn Commands(comptime Backend: type) type {
         }
 
         pub fn applyUniforms(self: *Backend, shader: *const r.Shader, slot: usize, data: t.Range) void {
-            const block = shader.uniform_blocks[slot];
+            const block = &shader.uniform_blocks[slot];
             const driver = self.cache.driver;
             for (block.uniforms[0..block.count]) |uniform| {
                 if (uniform.location == -1) continue;

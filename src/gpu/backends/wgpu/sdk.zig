@@ -953,3 +953,17 @@ pub fn loadProcs(get_proc_address: *const fn (name: [:0]const u8, user_data: ?*a
     }
     return procs;
 }
+
+pub const Instance = *opaque {};
+pub const FutureWaitInfo = extern struct { future: Future = .{}, completed: u32 = 0 };
+pub const InstanceWaitAnyFn = *const fn (?Instance, usize, ?[*]FutureWaitInfo, u64) callconv(.c) u32;
+pub const ErrorScopeCallback = *const fn (u32, u32, StringView, ?*anyopaque, ?*anyopaque) callconv(.c) void;
+pub const ErrorScopeCallbackInfo = extern struct {
+    next_in_chain: ?*ChainedStruct = null,
+    mode: u32 = 3,
+    callback: ?ErrorScopeCallback = null,
+    userdata1: ?*anyopaque = null,
+    userdata2: ?*anyopaque = null,
+};
+pub const PushErrorScopeFn = *const fn (?Device, u32) callconv(.c) void;
+pub const PopErrorScopeFn = *const fn (?Device, ErrorScopeCallbackInfo) callconv(.c) Future;

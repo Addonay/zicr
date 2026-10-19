@@ -1,8 +1,8 @@
 //! Native D3D11 commands from sokol_gfx.h:15358-16000.
 const std = @import("std");
 const sdk = @import("sdk.zig");
-const c = @import("constants.zig");
-const convert = @import("convert.zig");
+const c = @import("../dxgi/constants.zig");
+const convert = @import("../dxgi/convert.zig");
 const r = @import("resources.zig");
 const t = @import("../../types.zig");
 const e = @import("../../enums.zig");
@@ -118,14 +118,14 @@ pub fn Commands(comptime Backend: type) type {
             var offsets: [8]u32 = @splat(0);
             const compute = bnd.pipeline.desc.compute;
             if (compute) sdk.csSetShaderResources(self.context, 0, 32, &views[2]);
-            if (!compute) for (bnd.vertex_buffers, bnd.vertex_offsets, 0..) |optional, offset, i| {
+            if (!compute) for (&bnd.vertex_buffers, &bnd.vertex_offsets, 0..) |optional, offset, i| {
                 if (optional) |buffer| {
                     buffers[i] = buffer.resource.object;
                     offsets[i] = @intCast(offset);
                 }
             };
             var fragment_uavs = false;
-            for (bnd.views, bnd.shader.desc.views, 0..) |optional, required, i| {
+            for (&bnd.views, &bnd.shader.desc.views, 0..) |optional, required, i| {
                 const view = optional orelse continue;
                 const stage = if (required.texture.stage != .none) required.texture.stage else if (required.storage_buffer.stage != .none) required.storage_buffer.stage else required.storage_image.stage;
                 if (stage == .none) continue;
@@ -139,7 +139,7 @@ pub fn Commands(comptime Backend: type) type {
                     fragment_uavs = fragment_uavs or stage == .fragment;
                 }
             }
-            for (bnd.samplers, bnd.shader.desc.samplers, 0..) |optional, required, i| {
+            for (&bnd.samplers, &bnd.shader.desc.samplers, 0..) |optional, required, i| {
                 const sampler = optional orelse continue;
                 if (required.stage == .none) continue;
                 samplers[@backingInt(required.stage) - 1][bnd.shader.resource.sampler_registers[i]] = sampler.object;

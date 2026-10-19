@@ -2,14 +2,14 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const sdk = @import("sdk.zig");
-const c = @import("constants.zig");
-const convert = @import("convert.zig");
+const c = @import("../dxgi/constants.zig");
+const convert = @import("../dxgi/convert.zig");
 const r = @import("resources.zig");
 const t = @import("../../types.zig");
 const e = @import("../../enums.zig");
 const formats = @import("../../formats.zig");
 const core = @import("../../core.zig");
-const Compiler = @import("compiler.zig").Compiler;
+const Compiler = @import("../dxgi/compiler.zig").Compiler;
 
 const debug_name: sdk.Guid = .{ .data1 = 0x429b8c22, .data2 = 0x9188, .data3 = 0x4b0c, .data4 = .{ 0x87, 0x42, 0xac, 0xb0, 0xbf, 0x85, 0xc2, 0x00 } };
 

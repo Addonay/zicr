@@ -45,20 +45,19 @@ fn acquireCmdBuffer(self: *Backend) void {
     else
         sdk.msg(sdk.Id, self.cmd_queue, "commandBufferWithUnretainedReferences", .{});
     self.cmd_buffer = sdk.retain(cmd_buffer);
-    completion_semaphore = self.sem;
+    var completion = sdk.completionBlock(&commandBufferCompleted, self.sem, self.loss);
     sdk.msg(void, self.cmd_buffer, "enqueue", .{});
-    sdk.msg(void, self.cmd_buffer, "addCompletedHandler:", .{sdk.globalBlock(&commandBufferCompleted)});
+    sdk.msg(void, self.cmd_buffer, "addCompletedHandler:", .{@as(sdk.Id, @ptrCast(&completion))});
 }
 
-/// Semaphore signaled by the completion handler of every command buffer. Only one
-/// Metal backend is active at a time, so it is a plain global like `_sg.mtl.sem`.
-var completion_semaphore: sdk.Id = null;
-
-/// Completion handler of the command buffers, called on a Metal thread.
+/// Every command buffer signals the semaphore captured by its own device.
 fn commandBufferCompleted(block: ?*anyopaque, cmd_buffer: sdk.Id) callconv(.c) void {
-    _ = block;
-    _ = cmd_buffer;
-    sdk.semaphoreSignal(completion_semaphore);
+    const captured: *const sdk.CompletionBlock = @ptrCast(@alignCast(block.?));
+    const semaphore = captured.semaphore;
+    if (sdk.msg(sdk.Uint, cmd_buffer, "status", .{}) == 5) {
+        if (captured.loss) |loss| _ = loss.cmpxchgStrong(0, -1, .acq_rel, .acquire);
+    }
+    sdk.semaphoreSignal(semaphore);
 }
 
 fn acquireBlitCmdEncoder(self: *Backend) void {
@@ -874,92 +873,125 @@ fn finishReadback(rb: Readback) bool {
     return status == mtl_status_completed;
 }
 
-/// Readback (zicr extension): waits for committed GPU work, copies buffer bytes into `out`.
-/// Outside passes only. Bytes are copied through a shared temporary buffer.
-pub fn readBuffer(self: *Backend, buf: *core.Buffer, offset: usize, out: []u8) bool {
-    if (out.len == 0) return false;
-    const res = switch (buf.native) {
-        .metal => |*m| m,
-        else => return false,
-    };
-    const src = self.idpool.id(res.buf[@intCast(buf.cmn.active_slot)]);
-    if (src == null) return false;
-    // CPU writes to a managed buffer are reported to the GPU before the copy
-    commitBufferWriteRange(self, buf);
-
-    const temp = sdk.msg(sdk.Id, self.mtl_device, "newBufferWithLength:options:", .{ uint(out.len), sdk.resource_storage_shared });
-    if (temp == null) return false;
-    defer sdk.release(temp);
-    const rb = beginReadback(self) orelse return false;
-    sdk.msg(void, rb.blit, "copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:", .{ src, uint(offset), temp, uint(0), uint(out.len) });
-    if (!finishReadback(rb)) return false;
-
-    const contents = sdk.msg(?*anyopaque, temp, "contents", .{}) orelse return false;
-    const bytes: [*]const u8 = @ptrCast(contents);
-    @memcpy(out, bytes[0..out.len]);
-    return true;
+/// Synchronous compatibility path, sharing the same aligned copy implementation.
+pub fn readBuffer(self: *Backend, buffer: *core.Buffer, offset: usize, out: []u8) bool {
+    const task = requestBufferRead(self, buffer, offset, out) orelse return false;
+    const read: *NativeRead = @alignCast(@fieldParentPtr("task", task));
+    defer read.destroyResources(); // out is borrowed on this compatibility path
+    return task.poll(true) catch false;
+}
+pub fn readImage(self: *Backend, image: *core.Image, region: *const core.ReadRegion, out: []u8) bool {
+    const task = requestImageRead(self, image, region, out) orelse return false;
+    const read: *NativeRead = @alignCast(@fieldParentPtr("task", task));
+    defer read.destroyResources();
+    return task.poll(true) catch false;
 }
 
-/// Readback (zicr extension): waits for committed GPU work, copies an image region into `out`.
-/// Outside passes only. The output uses the region's bytes_per_row and bytes_per_slice.
-pub fn readImage(self: *Backend, img: *core.Image, region: *const core.ReadRegion, out: []u8) bool {
-    const res = switch (img.native) {
-        .metal => |*m| m,
-        else => return false,
-    };
-    const tex = self.idpool.id(res.tex[@intCast(img.cmn.active_slot)]);
-    if (tex == null or region.width == 0 or region.height == 0 or region.num_slices == 0) return false;
-
-    // the bytes the copy writes: every slice up to the last row of the last slice
-    const row_bytes: usize = @intCast(core.formats.rowPitch(img.cmn.pixel_format, @intCast(region.width), 1));
-    const required = @as(usize, region.num_slices - 1) * region.bytes_per_slice +
-        @as(usize, region.height - 1) * region.bytes_per_row + row_bytes;
-    if (out.len < required or region.bytes_per_row < row_bytes) return false;
-
-    const temp = sdk.msg(sdk.Id, self.mtl_device, "newBufferWithLength:options:", .{ uint(required), sdk.resource_storage_shared });
-    if (temp == null) return false;
-    defer sdk.release(temp);
-    const rb = beginReadback(self) orelse return false;
-
-    const mip: sdk.Uint = @intCast(region.mip_level);
-    const bytes_per_row = uint(region.bytes_per_row);
-    const size_2d: sdk.Size = .{ .width = uint(region.width), .height = uint(region.height), .depth = 1 };
-    if (img.cmn.type == .@"3d") {
-        // one copy covers all slices, they are the depth of the region
-        const origin: sdk.Origin = .{ .x = uint(region.x), .y = uint(region.y), .z = uint(region.slice) };
-        const size: sdk.Size = .{ .width = uint(region.width), .height = uint(region.height), .depth = uint(region.num_slices) };
-        sdk.msg(void, rb.blit, "copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toBuffer:destinationOffset:destinationBytesPerRow:destinationBytesPerImage:", .{
-            tex,
-            uint(0),
-            mip,
-            origin,
-            size,
-            temp,
-            uint(0),
-            bytes_per_row,
-            uint(region.bytes_per_slice),
-        });
-    } else {
-        // 2D, array and cube textures are copied slice by slice
-        const origin: sdk.Origin = .{ .x = uint(region.x), .y = uint(region.y), .z = 0 };
-        for (0..region.num_slices) |i| {
-            sdk.msg(void, rb.blit, "copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toBuffer:destinationOffset:destinationBytesPerRow:destinationBytesPerImage:", .{
-                tex,
-                uint(region.slice + i),
-                mip,
-                origin,
-                size_2d,
-                temp,
-                uint(i * region.bytes_per_slice),
-                bytes_per_row,
-                uint(0),
-            });
-        }
+const NativeRead = struct {
+    task: @import("../../readback_task.zig").Task,
+    buffer: sdk.Id = null,
+    command: sdk.Id = null,
+    encoder: sdk.Id = null,
+    offset: usize = 0,
+    row_bytes: usize = 0,
+    rows: usize = 1,
+    slices: usize = 1,
+    source_row: usize = 0,
+    source_slice: usize = 0,
+    target_row: usize = 0,
+    target_slice: usize = 0,
+    fn create(backend: *Backend, size: usize, out: []u8) ?*NativeRead {
+        const read = backend.allocator.create(NativeRead) catch return null;
+        read.* = .{ .task = .{ .owner = core.state(), .allocator = backend.allocator, .data = out, .poll_fn = poll, .destroy_fn = destroy } };
+        var success = false;
+        defer if (!success) read.destroyResources();
+        read.buffer = sdk.msg(sdk.Id, backend.mtl_device, "newBufferWithLength:options:", .{ uint(size), sdk.resource_storage_shared });
+        if (read.buffer == null) return null;
+        const commands = beginReadback(backend) orelse return null;
+        read.command = commands.cmd;
+        read.encoder = commands.blit;
+        success = true;
+        return read;
     }
-    if (!finishReadback(rb)) return false;
-
-    const contents = sdk.msg(?*anyopaque, temp, "contents", .{}) orelse return false;
-    const bytes: [*]const u8 = @ptrCast(contents);
-    @memcpy(out[0..required], bytes[0..required]);
-    return true;
+    fn submit(self: *NativeRead) void {
+        sdk.msg(void, self.encoder, "endEncoding", .{});
+        sdk.release(self.encoder);
+        self.encoder = null;
+        // commandBuffer (not commandBufferWithUnretainedReferences) retains the
+        // source resources independently of the frame's garbage-collection slot.
+        sdk.msg(void, self.command, "commit", .{});
+    }
+    fn poll(task: *@import("../../readback_task.zig").Task, wait: bool) error{ReadFailed}!bool {
+        const self: *NativeRead = @alignCast(@fieldParentPtr("task", task));
+        if (wait) sdk.msg(void, self.command, "waitUntilCompleted", .{});
+        const status = sdk.msg(sdk.Uint, self.command, "status", .{});
+        if (status == 5) {
+            core.recordLoss(-1);
+            return error.ReadFailed;
+        }
+        if (status != 4) return false;
+        if (task.refs == 1) return true;
+        const contents = sdk.msg(?*anyopaque, self.buffer, "contents", .{}) orelse return error.ReadFailed;
+        const bytes: [*]const u8 = @ptrCast(contents);
+        if (self.row_bytes == 0) @memcpy(task.data, bytes[self.offset..][0..task.data.len]) else {
+            for (0..self.slices) |slice| for (0..self.rows) |row| {
+                const from = slice * self.source_slice + row * self.source_row;
+                const to = slice * self.target_slice + row * self.target_row;
+                @memcpy(task.data[to..][0..self.row_bytes], bytes[from..][0..self.row_bytes]);
+            };
+        }
+        return true;
+    }
+    fn destroyResources(self: *NativeRead) void {
+        if (self.encoder != null) sdk.msg(void, self.encoder, "endEncoding", .{});
+        sdk.release(self.encoder);
+        sdk.release(self.command);
+        sdk.release(self.buffer);
+        self.task.allocator.destroy(self);
+    }
+    fn destroy(task: *@import("../../readback_task.zig").Task) void {
+        const self: *NativeRead = @alignCast(@fieldParentPtr("task", task));
+        task.allocator.free(task.data);
+        self.destroyResources();
+    }
+};
+pub fn requestBufferRead(self: *Backend, buffer: *core.Buffer, offset: usize, out: []u8) ?*@import("../../readback_task.zig").Task {
+    const source = self.idpool.id(buffer.native.metal.buf[@intCast(buffer.cmn.active_slot)]);
+    if (source == null) return null;
+    commitBufferWriteRange(self, buffer);
+    const start = if (self.macos) offset & ~@as(usize, 3) else offset;
+    const end = if (self.macos) (std.math.add(usize, std.math.add(usize, offset, out.len) catch return null, 3) catch return null) & ~@as(usize, 3) else offset + out.len;
+    if (end > sdk.msg(sdk.Uint, source, "length", .{})) return null; // injected buffers must provide an aligned span
+    const read = NativeRead.create(self, end - start, out) orelse return null;
+    read.offset = offset - start;
+    sdk.msg(void, read.encoder, "copyFromBuffer:sourceOffset:toBuffer:destinationOffset:size:", .{ source, uint(start), read.buffer, uint(0), uint(end - start) });
+    read.submit();
+    return &read.task;
+}
+pub fn requestImageRead(self: *Backend, image: *core.Image, region: *const core.ReadRegion, out: []u8) ?*@import("../../readback_task.zig").Task {
+    const source = self.idpool.id(image.native.metal.tex[@intCast(image.cmn.active_slot)]);
+    if (source == null or core.formats.isCompressed(image.cmn.pixel_format) or core.isDepthOrDepthStencilFormat(image.cmn.pixel_format)) return null;
+    const row_bytes: usize = @intCast(core.formats.rowPitch(image.cmn.pixel_format, @intCast(region.width), 1));
+    const row = std.mem.alignForward(usize, row_bytes, 256);
+    const slice = std.math.mul(usize, row, region.height) catch return null;
+    const total = std.math.mul(usize, slice, region.num_slices) catch return null;
+    const read = NativeRead.create(self, total, out) orelse return null;
+    read.row_bytes = row_bytes;
+    read.rows = region.height;
+    read.slices = region.num_slices;
+    read.source_row = row;
+    read.source_slice = slice;
+    read.target_row = region.bytes_per_row;
+    read.target_slice = region.bytes_per_slice;
+    const volume = image.cmn.type == .@"3d";
+    for (0..region.num_slices) |i| {
+        const origin: sdk.Origin = .{ .x = uint(region.x), .y = uint(region.y), .z = if (volume) uint(region.slice + i) else 0 };
+        const size: sdk.Size = .{ .width = uint(region.width), .height = uint(region.height), .depth = 1 };
+        sdk.msg(void, read.encoder, "copyFromTexture:sourceSlice:sourceLevel:sourceOrigin:sourceSize:toBuffer:destinationOffset:destinationBytesPerRow:destinationBytesPerImage:", .{
+            source,      if (volume) uint(0) else uint(region.slice + i), uint(region.mip_level), origin,                               size,
+            read.buffer, uint(i * slice),                                 uint(row),              if (volume) uint(slice) else uint(0),
+        });
+    }
+    read.submit();
+    return &read.task;
 }

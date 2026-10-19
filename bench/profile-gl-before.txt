@@ -1,0 +1,31 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 3K of event 'cycles:u'
+# Event count (approx.): 12349891797
+#
+# Overhead  Command         Shared Object           Symbol
+# ........  ..............  ......................  .........................................................................................................................................................................................................................................................................
+#
+    24.35%  zicr-bench-gl   zicr-bench-gl           [.] compiler_rt.memcpy.memcpyFast
+    17.41%  zicr-bench-gl   zicr-bench-gl           [.] backend.applyBindings
+     4.92%  zicr-bench-gl   zicr-bench-gl           [.] api.applyBindings
+     3.76%  zicr-ben:gdrv0  libgallium-26.2.4.so    [.] void si_draw_vbo<(amd_gfx_level)11, (si_has_tess)0, (si_has_gs)0, (si_has_ngg)0, (si_has_sh_pairs_packed)0, (si_alt_hiz_logic)0>(pipe_context*, pipe_draw_info const*, unsigned int, pipe_draw_indirect_info const*, pipe_draw_start_count_bias const*, unsigned int)
+     2.88%  zicr-bench:gl0  libgallium-26.2.4.so    [.] _mesa_lookup_bufferobj.part.0
+     2.44%  zicr-bench-gl   zicr-bench-gl           [.] main.main
+     2.09%  zicr-bench-gl   zicr-bench-gl           [.] api.applyUniforms
+     2.07%  zicr-bench-gl   zicr-bench-gl           [.] compiler_rt.fastMemset
+     1.59%  zicr-bench:gl0  libgallium-26.2.4.so    [.] _mesa_uniform
+     1.32%  zicr-bench:gl0  libgallium-26.2.4.so    [.] st_upload_constants
+     1.23%  zicr-bench:gl0  libgallium-26.2.4.so    [.] _mesa_flush_vertices_for_uniforms
+     1.21%  zicr-bench:gl0  libgallium-26.2.4.so    [.] st_prepare_draw
+     1.14%  zicr-ben:gdrv0  libgallium-26.2.4.so    [.] si_set_constant_buffer
+     1.14%  zicr-ben:gdrv0  libgallium-26.2.4.so    [.] amdgpu_cs_add_buffer(radeon_cmdbuf*, pb_buffer_lean*, unsigned int, radeon_bo_domain)
+     1.01%  zicr-bench:gl0  libgallium-26.2.4.so    [.] tc_draw_single
+
+
+#
+# (Tip: Boolean options have negative forms, e.g.: perf report --no-children)
+#
