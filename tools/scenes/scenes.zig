@@ -6,6 +6,7 @@ const gpu = @import("zicr").gpu;
 const shaders = @import("scene_shaders");
 const compute_shaders = @import("scene_compute_shaders");
 const feature_shaders = @import("scene_feature_shaders");
+const renderer_shaders = @import("scene_renderer_shaders");
 
 pub const size = 64;
 pub const Pixels = [size * size][4]u8;
@@ -206,6 +207,10 @@ const quadrant_colors = [4][4]u8{ rgba8(red), rgba8(green), rgba8(blue), rgba8(w
 
 pub const all = [_]Scene{
     .{ .name = "clear", .run = clear },
+    .{ .name = "render2d_order_clip", .run = render2dOrderClip },
+    .{ .name = "render2d_vector_fill", .run = render2dVectorFill },
+    .{ .name = "render2d_vector_curves", .run = render2dVectorCurves },
+    .{ .name = "render2d_strokes", .run = render2dStrokes },
     .{ .name = "triangles", .run = triangles },
     .{ .name = "indexed_uint16", .run = indexedUint16 },
     .{ .name = "indexed_uint32_base_vertex", .run = indexedBaseVertex },
@@ -1827,4 +1832,158 @@ fn randomizedBackendStream(env: *Env) !void {
     }
     const pixels = try env.readRendered(target.image);
     try env.expectPixel(&pixels, 32, 32, rgba8(expected), 0);
+}
+
+fn render2dOrderClip(env: *Env) !void {
+    const r2 = @import("zicr").render2d;
+    const target = try env.target(.rgba8);
+    defer env.destroyTarget(target);
+    const desc = if (env.legacy_gl) renderer_shaders.quad.glsl330 else renderer_shaders.quad.desc(env.backend()) orelse return error.NoShaderForBackend;
+    var renderer = try r2.Renderer.init(env.dev, desc, .{ .max_quads = 4 });
+    defer renderer.deinit();
+    var list = try r2.DrawList.init(env.allocator, .{ .max_quads = 4 });
+    defer list.deinit();
+    try list.reset(size, size, null);
+    try list.rect(.{ .width = size, .height = size }, .{ .r = 0, .g = 0, .b = 1 });
+    try list.rect(.{ .width = 32, .height = size }, .{ .r = 1, .g = 0, .b = 0, .a = 0.5 });
+    try list.pushClip(.{ .x = 16, .y = 8, .width = 16, .height = 16 });
+    try list.rect(.{ .width = size, .height = size }, .{ .r = 0, .g = 1, .b = 0 });
+    try list.popClip();
+    try renderer.submit(&list, .{ .target = .{ .attachments = .{ .colors = &.{target.view} } }, .colors = &.{.{ .load = .{ .clear = .{ 0, 0, 0, 0 } } }} });
+    env.dev.commit();
+    const pixels = try env.readRendered(target.image);
+    for (0..size) |y| for (0..size) |x| {
+        const expected: [4]u8 = if (x >= 16 and x < 32 and y >= 8 and y < 24) .{ 0, 255, 0, 255 } else if (x < 32) .{ 128, 0, 128, 255 } else .{ 0, 0, 255, 255 };
+        try env.expectPixel(&pixels, x, y, expected, 1);
+    };
+}
+
+fn render2dVectorFill(env: *Env) !void {
+    const r2 = @import("zicr").render2d;
+    const target = try env.target(.rgba8);
+    defer env.destroyTarget(target);
+    const desc = if (env.legacy_gl) renderer_shaders.quad.glsl330 else renderer_shaders.quad.desc(env.backend()) orelse return error.NoShaderForBackend;
+    var renderer = try r2.Renderer.init(env.dev, desc, .{ .max_quads = 256 });
+    defer renderer.deinit();
+    var list = try r2.DrawList.init(env.allocator, .{ .max_quads = 256 });
+    defer list.deinit();
+    var path = r2.Path.init(env.allocator);
+    defer path.deinit();
+    try path.moveTo(.{});
+    try path.lineTo(.{ .x = 32 });
+    try path.lineTo(.{ .y = 32 });
+    // Open contours fill as closed. Reverse-wound rectangle cuts out a hole.
+    try path.addRect(.{ .x = 12, .y = 4, .width = -8, .height = 8 });
+    try list.reset(size, size, null);
+    try list.rect(.{ .width = size, .height = size }, .{ .r = 0, .g = 0, .b = 1 });
+    try list.fillPath(&path, .{ .r = 1, .g = 0, .b = 0 }, .{});
+    try renderer.submit(&list, .{ .target = .{ .attachments = .{ .colors = &.{target.view} } }, .colors = &.{.{ .load = .{ .clear = .{ 0, 0, 0, 0 } } }} });
+    env.dev.commit();
+    const pixels = try env.readRendered(target.image);
+    for (0..size) |y| for (0..size) |x| {
+        const hole = x >= 4 and x < 12 and y >= 4 and y < 12;
+        const expected: [4]u8 = if (hole or x + y >= 32) .{ 0, 0, 255, 255 } else if (x + y == 31) .{ 128, 0, 128, 255 } else .{ 255, 0, 0, 255 };
+        try env.expectPixel(&pixels, x, y, expected, 1);
+    };
+}
+
+fn render2dVectorCurves(env: *Env) !void {
+    const r2 = @import("zicr").render2d;
+    const target = try env.target(.rgba8);
+    defer env.destroyTarget(target);
+    const desc = if (env.legacy_gl) renderer_shaders.quad.glsl330 else renderer_shaders.quad.desc(env.backend()) orelse return error.NoShaderForBackend;
+    var renderer = try r2.Renderer.init(env.dev, desc, .{ .max_quads = 512 });
+    defer renderer.deinit();
+    var list = try r2.DrawList.init(env.allocator, .{ .max_quads = 512 });
+    defer list.deinit();
+    var path = r2.Path.init(env.allocator);
+    defer path.deinit();
+    const cx: f64 = 31.25;
+    const cy: f64 = 32.75;
+    const rx: f64 = 17.5;
+    const ry: f64 = 9.25;
+    const angle: f64 = 0.43;
+    try path.ellipse(.{ .x = cx, .y = cy }, .{ .x = rx, .y = ry }, angle);
+    try list.reset(size, size, null);
+    try list.rect(.{ .width = size, .height = size }, .{ .r = 0, .g = 0, .b = 1 });
+    try list.fillPath(&path, .{ .r = 1, .g = 0, .b = 0 }, .{});
+    try renderer.submit(&list, .{ .target = .{ .attachments = .{ .colors = &.{target.view} } }, .colors = &.{.{ .load = .{ .clear = .{ 0, 0, 0, 0 } } }} });
+    env.dev.commit();
+    const pixels = try env.readRendered(target.image);
+    // Independent oracle: integrate exact rotated-ellipse horizontal sections.
+    // No path flattening, contour winding or coverage implementation is reused.
+    const cosine = @cos(angle);
+    const sine = @sin(angle);
+    const aa = cosine * cosine / (rx * rx) + sine * sine / (ry * ry);
+    const bb = cosine * sine * (1 / (rx * rx) - 1 / (ry * ry));
+    const cc = sine * sine / (rx * rx) + cosine * cosine / (ry * ry);
+    const ex = std.math.hypot(rx * cosine, ry * sine);
+    const ey = std.math.hypot(rx * sine, ry * cosine);
+    for (0..size) |y| for (0..size) |x| {
+        const px: f64 = @floatFromInt(x);
+        const py: f64 = @floatFromInt(y);
+        var alpha: f64 = 0;
+        if (px + 1 > cx - ex and px < cx + ex and py + 1 > cy - ey and py < cy + ey) {
+            var fully_inside = true;
+            for ([_][2]f64{ .{ 0, 0 }, .{ 1, 0 }, .{ 1, 1 }, .{ 0, 1 } }) |offset| {
+                const xx = px + offset[0] - cx;
+                const yy = py + offset[1] - cy;
+                if (aa * xx * xx + 2 * bb * xx * yy + cc * yy * yy > 1) fully_inside = false;
+            }
+            if (fully_inside) alpha = 1 else {
+                for (0..4096) |sample| {
+                    const yy = py + (@as(f64, @floatFromInt(sample)) + 0.5) / 4096.0 - cy;
+                    const discriminant = bb * bb * yy * yy - aa * (cc * yy * yy - 1);
+                    if (discriminant <= 0) continue;
+                    const midpoint = cx - bb * yy / aa;
+                    const halfwidth = @sqrt(discriminant) / aa;
+                    alpha += @max(0, @min(px + 1, midpoint + halfwidth) - @max(px, midpoint - halfwidth)) / 4096.0;
+                }
+            }
+        }
+        const expected: [4]u8 = .{ @intFromFloat(@round(std.math.clamp(alpha, 0, 1) * 255)), 0, @intFromFloat(@round((1 - std.math.clamp(alpha, 0, 1)) * 255)), 255 };
+        try env.expectPixel(&pixels, x, y, expected, 1);
+    };
+}
+
+fn render2dStrokes(env: *Env) !void {
+    const r2 = @import("zicr").render2d;
+    const target = try env.target(.rgba8);
+    defer env.destroyTarget(target);
+    const desc = if (env.legacy_gl) renderer_shaders.quad.glsl330 else renderer_shaders.quad.desc(env.backend()) orelse return error.NoShaderForBackend;
+    var renderer = try r2.Renderer.init(env.dev, desc, .{ .max_quads = 512 });
+    defer renderer.deinit();
+    var list = try r2.DrawList.init(env.allocator, .{ .max_quads = 512 });
+    defer list.deinit();
+    var path = r2.Path.init(env.allocator);
+    defer path.deinit();
+    try list.reset(size, size, null);
+    try list.rect(.{ .width = size, .height = size }, .{ .r = 0, .g = 0, .b = 1 });
+    try path.moveTo(.{ .x = 8, .y = 12 });
+    try path.lineTo(.{ .x = 56, .y = 12 });
+    try list.strokePath(&path, .{ .r = 1, .g = 0, .b = 0 }, .{ .width = 4 });
+    path.clear();
+    try path.moveTo(.{ .x = 8, .y = 28 });
+    try path.lineTo(.{ .x = 56, .y = 28 });
+    try list.strokePath(&path, .{ .r = 1, .g = 0, .b = 0 }, .{ .width = 4, .dashes = &.{ 6, 6 } });
+    path.clear();
+    try path.moveTo(.{ .x = 8, .y = 44 });
+    try path.lineTo(.{ .x = 56, .y = 44 });
+    try list.strokePath(&path, .{ .r = 1, .g = 0, .b = 0 }, .{ .width = 4, .start_cap = .triangle, .end_cap = .triangle });
+    try renderer.submit(&list, .{ .target = .{ .attachments = .{ .colors = &.{target.view} } }, .colors = &.{.{ .load = .{ .clear = .{ 0, 0, 0, 0 } } }} });
+    env.dev.commit();
+    const pixels = try env.readRendered(target.image);
+    for (0..size) |y| for (0..size) |x| {
+        var alpha: f32 = 0;
+        if (x >= 8 and x < 56 and y >= 10 and y < 14) alpha = 1;
+        if (x >= 8 and x < 56 and y >= 26 and y < 30 and (x - 8) % 12 < 6) alpha = 1;
+        if (x >= 8 and x < 56 and y >= 42 and y < 46) alpha = 1;
+        if (y >= 42 and y < 46) {
+            const row = y - 42;
+            if (x == 7 or x == 56) alpha = if (row == 0 or row == 3) 0.5 else 1;
+            if ((x == 6 or x == 57) and (row == 1 or row == 2)) alpha = 0.5;
+        }
+        const expected: [4]u8 = .{ @intFromFloat(@round(alpha * 255)), 0, @intFromFloat(@round((1 - alpha) * 255)), 255 };
+        try env.expectPixel(&pixels, x, y, expected, 1);
+    };
 }

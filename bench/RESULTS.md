@@ -116,3 +116,16 @@ less time on this driver. CV 14–26% does not support small inter-mode speed cl
 Unit tests protect coherence, allowed memory bits and fallback. Both Vulkan
 strategies pass the full async scene suite. Data: `vulkan-2026-10-19-10000-gpa.json`
 and `vulkan-2026-10-19-10000-cached-readback.json`.
+
+
+## Initial 2D renderer baseline (2026-10-19)
+
+The ordered renderer has its own 10,000-quad batched/fragmented workload, with
+CPU geometry encoding separated from submission, pixel verification and GPU
+drain outside timing. Both GL and Vulkan passed with zero measured steady-state
+DrawList or Device allocator calls. These are CPU timings, not GPU timings or
+comparisons with the C GPU benchmark above. The benchmark uses ReleaseFast with
+library/native validation and runtime statistics disabled. See the
+[renderer evidence ledger](../tasks/RENDERER.md#measured-cpu-baseline-2026-10-19)
+for means, variance and setup, and
+[raw samples](results/render2d-2026-10-19.json).

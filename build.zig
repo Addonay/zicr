@@ -44,6 +44,46 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(module_check).step);
     check_step.dependOn(&module_check.step);
 
+    const renderer_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/render2d/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "gpu", .module = gpu_mod }},
+    }) });
+    const renderer_test_step = b.step("test-render2d", "Run renderer ordering, geometry and ownership tests");
+    const renderer_run = b.addRunArtifact(renderer_tests);
+    renderer_test_step.dependOn(&renderer_run.step);
+    test_step.dependOn(&renderer_run.step);
+    check_step.dependOn(&renderer_tests.step);
+
+    const renderer_example = toolModule(b, "tools/render2d/main.zig", target, optimize, zicrOptions(b, true, true));
+    const renderer_options = b.addOptions();
+    renderer_options.addOption(bool, "benchmark", false);
+    renderer_example.addOptions("render2d_options", renderer_options);
+    const renderer_zicr = renderer_example.import_table.get("zicr").?;
+    if (shaderModule(b, b, .{ .input = b.path("src/render2d/shaders.glsl"), .zicr = renderer_zicr })) |renderer_shaders| {
+        renderer_example.addImport("renderer_shaders", renderer_shaders);
+        renderer_example.addImport("harness", b.createModule(.{ .root_source_file = b.path("tools/harness/harness.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "zicr", .module = renderer_zicr }} }));
+        const executable = b.addExecutable(.{ .name = "zicr-render2d", .root_module = renderer_example });
+        const run = b.addRunArtifact(executable);
+        run.addPassthruArgs();
+        b.step("test-render2d-scenes", "Run renderer pixel acceptance on a selected native backend").dependOn(&run.step);
+        b.step("check-render2d", "Compile the renderer pixel example").dependOn(&executable.step);
+        const bench_module = toolModule(b, "tools/render2d/main.zig", target, .fast, zicrOptions(b, false, false));
+        const bench_renderer_options = b.addOptions();
+        bench_renderer_options.addOption(bool, "benchmark", true);
+        bench_module.addOptions("render2d_options", bench_renderer_options);
+        const bench_zicr = bench_module.import_table.get("zicr").?;
+        if (shaderModule(b, b, .{ .input = b.path("src/render2d/shaders.glsl"), .zicr = bench_zicr })) |bench_shaders| {
+            bench_module.addImport("renderer_shaders", bench_shaders);
+            bench_module.addImport("harness", b.createModule(.{ .root_source_file = b.path("tools/harness/harness.zig"), .target = target, .optimize = .fast, .imports = &.{.{ .name = "zicr", .module = bench_zicr }} }));
+            const bench_exe = b.addExecutable(.{ .name = "zicr-render2d-bench", .root_module = bench_module });
+            const bench_run = b.addRunArtifact(bench_exe);
+            bench_run.addPassthruArgs();
+            b.step("bench-render2d", "Measure verified renderer batching with validation and statistics off").dependOn(&bench_run.step);
+        }
+    }
+
     const shader_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("tools/shdc/main.zig"),
         .target = b.graph.host,
@@ -164,11 +204,13 @@ pub fn build(b: *std.Build) void {
     if (shaderModule(b, b, .{ .input = b.path("tools/scenes/scenes.glsl"), .zicr = web_zicr })) |render| {
         if (shaderModule(b, b, .{ .input = b.path("tools/scenes/compute.glsl"), .compute = true, .zicr = web_zicr })) |compute| {
             const feature = featureShaderModule(b, web_zicr) orelse return;
+            const renderer_shaders = shaderModule(b, b, .{ .input = b.path("src/render2d/shaders.glsl"), .zicr = web_zicr }) orelse return;
+            web.addImport("renderer_shaders", renderer_shaders);
             web.addImport("scenes", b.createModule(.{
                 .root_source_file = b.path("tools/scenes/scenes.zig"),
                 .target = web_target,
                 .optimize = optimize,
-                .imports = &.{ .{ .name = "zicr", .module = web_zicr }, .{ .name = "scene_shaders", .module = render }, .{ .name = "scene_compute_shaders", .module = compute }, .{ .name = "scene_feature_shaders", .module = feature } },
+                .imports = &.{ .{ .name = "zicr", .module = web_zicr }, .{ .name = "scene_shaders", .module = render }, .{ .name = "scene_compute_shaders", .module = compute }, .{ .name = "scene_feature_shaders", .module = feature }, .{ .name = "scene_renderer_shaders", .module = renderer_shaders } },
             }));
             const wasm = b.addExecutable(.{ .name = "zicr-scenes", .root_module = web });
             wasm.entry = .disabled;
@@ -248,11 +290,12 @@ pub fn build(b: *std.Build) void {
         if (shaderModule(b, b, .{ .input = b.path("tools/scenes/scenes.glsl"), .zicr = apple_zicr })) |render| {
             if (shaderModule(b, b, .{ .input = b.path("tools/scenes/compute.glsl"), .compute = true, .zicr = apple_zicr })) |compute| {
                 const feature = featureShaderModule(b, apple_zicr) orelse return;
+                const renderer_shaders = shaderModule(b, b, .{ .input = b.path("src/render2d/shaders.glsl"), .zicr = apple_zicr }) orelse return;
                 apple_module.addImport("scenes", b.createModule(.{
                     .root_source_file = b.path("tools/scenes/scenes.zig"),
                     .target = apple_target,
                     .optimize = optimize,
-                    .imports = &.{ .{ .name = "zicr", .module = apple_zicr }, .{ .name = "scene_shaders", .module = render }, .{ .name = "scene_compute_shaders", .module = compute }, .{ .name = "scene_feature_shaders", .module = feature } },
+                    .imports = &.{ .{ .name = "zicr", .module = apple_zicr }, .{ .name = "scene_shaders", .module = render }, .{ .name = "scene_compute_shaders", .module = compute }, .{ .name = "scene_feature_shaders", .module = feature }, .{ .name = "scene_renderer_shaders", .module = renderer_shaders } },
                 }));
             }
         }
@@ -278,6 +321,7 @@ fn sceneExecutable(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     const compute = shaderModule(b, b, .{ .input = b.path("tools/scenes/compute.glsl"), .compute = true, .zicr = zicr }) orelse return null;
     const harness = b.createModule(.{ .root_source_file = b.path("tools/harness/harness.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "zicr", .module = zicr }} });
     module.addImport("scene_shaders", render);
+    module.addImport("scene_renderer_shaders", shaderModule(b, b, .{ .input = b.path("src/render2d/shaders.glsl"), .zicr = zicr }) orelse return null);
     module.addImport("scene_compute_shaders", compute);
     module.addImport("scene_feature_shaders", featureShaderModule(b, zicr) orelse return null);
     module.addImport("harness", harness);
@@ -338,6 +382,18 @@ pub const ShaderOptions = struct {
 /// Returns null until the lazy shader compiler dependency has been fetched.
 pub fn addShaderModule(b: *std.Build, zicr_dep: *std.Build.Dependency, options: ShaderOptions) ?*std.Build.Module {
     return shaderModule(b, zicr_dep.builder, options);
+}
+
+/// Build zicr's 2D shader set using the same public module as the application.
+/// Returns a module exposing `quad.desc(device.backend())`.
+pub fn addRender2dShaderModule(b: *std.Build, zicr_dep: *std.Build.Dependency, zicr_module: *std.Build.Module) ?*std.Build.Module {
+    return addShaderModule(b, zicr_dep, .{ .input = zicr_dep.path("src/render2d/shaders.glsl"), .zicr = zicr_module });
+}
+
+/// Full retained 2D paint/compositing/filter shader set. Descriptors are consumed
+/// by render2d.ScenePrograms.fromModule; shader compilation remains build-time.
+pub fn addRender2dSceneShaderModule(b: *std.Build, zicr_dep: *std.Build.Dependency, zicr_module: *std.Build.Module) ?*std.Build.Module {
+    return addShaderModule(b, zicr_dep, .{ .input = zicr_dep.path("src/render2d/scene_shaders.glsl"), .zicr = zicr_module });
 }
 
 fn shaderModule(b: *std.Build, owner: *std.Build, options: ShaderOptions) ?*std.Build.Module {

@@ -1,6 +1,10 @@
 //! Freestanding browser entry point; the browser owns the context and presentation.
 const std = @import("std");
 const gpu = @import("zicr").gpu;
+const r2 = @import("zicr").render2d;
+const renderer_shaders = @import("renderer_shaders");
+var canvas_renderer: ?r2.Renderer = null;
+var canvas_draws: ?r2.DrawList = null;
 const scenes = @import("scenes");
 const imports = gpu.web;
 extern "host" fn log(ptr: [*]const u8, len: usize) void;
@@ -69,6 +73,10 @@ export fn shutdown() void {
     clearReads();
     reads.deinit(std.heap.wasm_allocator);
     reads = .empty;
+    if (canvas_renderer) |*renderer| renderer.deinit();
+    canvas_renderer = null;
+    if (canvas_draws) |*draws| draws.deinit();
+    canvas_draws = null;
     if (initialized) device.deinit();
     initialized = false;
 }
@@ -171,18 +179,24 @@ export fn notify_device_lost(code: i32) void {
 export fn present_frame(frame: u32, native_view: usize) u32 {
     if (!initialized) return 0;
     errors = 0;
-    const color: [4]f32 = if (frame & 1 == 0) .{ 1, 0, 0, 1 } else .{ 0, 0, 1, 1 };
-    var pass = device.beginPass(.{
-        .target = .{ .swapchain = .{
-            .width = 64,
-            .height = 64,
-            .color_format = .rgba8,
-            .depth_format = .none,
-            .native = if (native_view == 0) .{ .gl = .{} } else .{ .wgpu = .{ .render_view = @ptrFromInt(native_view) } },
-        } },
-        .colors = &.{.{ .load = .{ .clear = color }, .store = .store }},
-    });
-    pass.end();
-    device.commit();
+    presentRendererFrame(frame, native_view) catch |err| {
+        const message = @errorName(err);
+        log(message.ptr, message.len);
+        return 0;
+    };
     return if (errors == 0) 1 else 0;
+}
+
+fn presentRendererFrame(frame: u32, native_view: usize) !void {
+    if (canvas_renderer == null) canvas_renderer = try r2.Renderer.init(&device, renderer_shaders.quad.desc(device.backend()) orelse return error.NoRendererShader, .{ .max_quads = 2 });
+    if (canvas_draws == null) canvas_draws = try r2.DrawList.init(std.heap.wasm_allocator, .{ .max_quads = 2 });
+    const draws = &canvas_draws.?;
+    try draws.reset(64, 64, null);
+    try draws.rect(.{ .width = 64, .height = 64 }, if (frame & 1 == 0) .{ .r = 1, .g = 0, .b = 0 } else .{ .r = 0, .g = 0, .b = 1 });
+    try draws.quad(.{ .rect = .{ .width = 8, .height = 8 }, .transform = .{ .tx = @floatFromInt(frame % 16), .ty = 4 }, .tint = .{ .r = 0, .g = 1, .b = 0 } });
+    try canvas_renderer.?.submit(draws, .{
+        .target = .{ .swapchain = .{ .width = 64, .height = 64, .color_format = .rgba8, .depth_format = .none, .native = if (native_view == 0) .{ .gl = .{} } else .{ .wgpu = .{ .render_view = @ptrFromInt(native_view) } } } },
+        .colors = &.{.{ .load = .dont_care, .store = .store }},
+    });
+    device.commit();
 }

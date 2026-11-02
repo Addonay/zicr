@@ -39,7 +39,8 @@ backend portability well. zicr is not a sokol fork, though:
 - **Performance is a goal, not a side effect.** The target is to match or beat C
   sokol_gfx on the same workloads; the first measured GL baseline and profile are in [bench/RESULTS.md](bench/RESULTS.md).
 
-Once the GPU layer is solid on every platform, the renderer is built on top of it.
+The first 2D renderer now builds on this foundation. Native platform validation
+gates remain explicit in the status table below.
 
 ## Status
 
@@ -67,7 +68,22 @@ resource recycling on each available API.
 
 The open work, known bugs and design concerns are in [TODO.md](TODO.md).
 
-## Using it
+## 2D renderer
+
+`zicr.render2d` is the first renderer layer: ordered sprites/atlas quads and
+colored rectangles, affine transforms, orthographic cameras, tint, alpha
+blending, nested pixel clips and offscreen composition. Applications retain
+scene/window ownership and control frame commit and presentation. Full vector, text, paint, compositing and effect support is now in progress;
+[the full capability ledger](tasks/FULL_2D.md) tracks remaining work. The current
+renderer now also has solid antialiased path fills, but remains incomplete. 3D follows later.
+
+The [2D API and shader-build guide](src/render2d/README.md) includes the ownership
+contract, runnable examples and test/benchmark commands. The
+[renderer design and evidence ledger](tasks/RENDERER.md) records scope and
+platform limits. The shared GPU suite now includes a separate
+renderer-specific ordering and vector-fill scenes in addition to the 64-scene GPU baseline above.
+
+## Using the GPU layer
 
 ```zig
 const std = @import("std");
@@ -263,6 +279,8 @@ src/gpu/core.zig, pool.zig   state, resources, generation-checked handle pools
 src/gpu/validation.zig       all 399 sokol validation checks, plus zicr's own
 src/gpu/backend.zig          runtime backend dispatch
 src/gpu/backends/            one directory per backend; CONTRACT.md is the interface
+src/render2d/                ordered 2D draw lists, GPU execution and shaders
+tools/render2d/              renderer example, benchmarks and dependency consumer
 tools/scenes/                the cross-backend scene suite and its shaders
 tools/harness/               device creation per backend for the scene suite
 tools/web/                   freestanding wasm entry, browser bridges and test runner
