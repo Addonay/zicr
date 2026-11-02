@@ -8,7 +8,7 @@ header = (root / "sokol_gfx.h").read_text()
 api = (root / "src/sokol_gfx/api.zig").read_text()
 exports = (root / "src/sokol_gfx/root.zig").read_text()
 functions = re.findall(r"SOKOL_GFX_API_DECL [^;\n]+?\b(sg_\w+)\(", header)
-implemented = set(re.findall(r"^pub fn (\w+)", api, re.MULTILINE))
+implemented = set(re.findall(r"^pub (?:fn|const) (\w+)", api, re.MULTILINE))
 missing = []
 for original in functions:
     words = original.removeprefix("sg_").split("_")
@@ -19,8 +19,7 @@ for original in functions:
         missing.append(original)
 print(f"Public API entry points: {len(functions) - len(missing)}/{len(functions)}")
 print("Entry-point coverage is not behavior or GPU backend parity.")
-print("Available setup backends: dummy, glcore, gles3, d3d11")
-print("Unported GPU backends: metal, wgpu, vulkan")
+print("Setup backends: dummy, glcore, gles3, d3d11, vulkan, wgpu, metal_macos, metal_ios, metal_simulator")
 for name in missing:
     print(f"Missing: {name}")
 raise SystemExit(bool(missing))

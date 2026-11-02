@@ -1,0 +1,9 @@
+#version 450
+// Writes the storage buffer that the fragment shader consumes.
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+layout(set = 1, binding = 2) buffer values_sb {
+    vec4 values[];
+};
+void main() {
+    values[0] = vec4(1.0, 1.0, 1.0, 1.0);
+}

@@ -1,0 +1,9 @@
+#version 450
+// Writes four vec4 values into the storage buffer: values[i] = (i, 2, 3, 4).
+layout(local_size_x = 4, local_size_y = 1, local_size_z = 1) in;
+layout(set = 1, binding = 2) buffer values_sb {
+    vec4 values[];
+};
+void main() {
+    values[gl_GlobalInvocationID.x] = vec4(float(gl_GlobalInvocationID.x), 2.0, 3.0, 4.0);
+}

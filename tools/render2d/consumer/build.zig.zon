@@ -1,0 +1,7 @@
+.{
+    .name = .renderer_consumer,
+    .fingerprint = 0xb043dd2cf36d2491,
+    .version = "0.0.0",
+    .dependencies = .{ .zicr = .{ .path = "../../.." } },
+    .paths = .{ "build.zig", "build.zig.zon", "main.zig" },
+}

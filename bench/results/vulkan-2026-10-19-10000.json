@@ -1,0 +1,1072 @@
+{
+  "schema": 1,
+  "timestamp_utc": "2026-10-18T21:41:01.206664+00:00",
+  "platform": "Linux-7.2.8-200.fc44.x86_64-x86_64-with-glibc2.43",
+  "machine": "x86_64",
+  "binary_sha256": "ffad22367cb5561d139a358040500704625a775e0b53e9025346699bf858185e",
+  "method": "rotating process order; warmups excluded; checked pixels and bytes outside timing; GPU drained between samples",
+  "c_readback": "native API equivalent because upstream sokol has no readback API",
+  "runs": [
+    {
+      "round": 0,
+      "command": [
+        "/home/addo/dev/stupid/zicr/zig-out/bin/zicr-bench-vulkan",
+        "--mode",
+        "c",
+        "--draws",
+        "10000",
+        "--resources",
+        "1000",
+        "--bytes",
+        "4194304",
+        "--samples",
+        "9",
+        "--warmup",
+        "3"
+      ],
+      "result": {
+        "schema": 1,
+        "backend": "vulkan",
+        "mode": "c",
+        "adapter": "AMD Radeon Graphics (RADV RENOIR)",
+        "zig": "0.17.0",
+        "optimize": "fast",
+        "c_compiler": "Clang 22.1.8",
+        "cpu": "znver3",
+        "validation": false,
+        "statistics": false,
+        "warmup": 3,
+        "results": [
+          {
+            "workload": "draws",
+            "operations": 10000,
+            "bytes": 0,
+            "samples_ns": [
+              5220212,
+              4283401,
+              4283551,
+              4005081,
+              4006372,
+              3553316,
+              3928967,
+              3525032,
+              3475991
+            ]
+          },
+          {
+            "workload": "churn",
+            "operations": 1000,
+            "bytes": 0,
+            "samples_ns": [
+              39948420,
+              41711707,
+              42509409,
+              44345022,
+              39142803,
+              41543253,
+              42012229,
+              39657576,
+              39682322
+            ]
+          },
+          {
+            "workload": "upload",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              372136,
+              413644,
+              371304,
+              352519,
+              345306,
+              379189,
+              387084,
+              547985,
+              390992
+            ]
+          },
+          {
+            "workload": "readback",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              21155083,
+              21107314,
+              19288322,
+              19455625,
+              19906538,
+              19886861,
+              20384121,
+              20524303,
+              20066948
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "round": 0,
+      "command": [
+        "/home/addo/dev/stupid/zicr/zig-out/bin/zicr-bench-vulkan",
+        "--mode",
+        "raw",
+        "--draws",
+        "10000",
+        "--resources",
+        "1000",
+        "--bytes",
+        "4194304",
+        "--samples",
+        "9",
+        "--warmup",
+        "3"
+      ],
+      "result": {
+        "schema": 1,
+        "backend": "vulkan",
+        "mode": "raw",
+        "adapter": "AMD Radeon Graphics (RADV RENOIR)",
+        "zig": "0.17.0",
+        "optimize": "fast",
+        "c_compiler": "Clang 22.1.8",
+        "cpu": "znver3",
+        "validation": false,
+        "statistics": false,
+        "warmup": 3,
+        "results": [
+          {
+            "workload": "draws",
+            "operations": 10000,
+            "bytes": 0,
+            "samples_ns": [
+              4112511,
+              3942473,
+              3942834,
+              3847175,
+              3877792,
+              3769479,
+              3879315,
+              3774980,
+              3788986
+            ]
+          },
+          {
+            "workload": "churn",
+            "operations": 1000,
+            "bytes": 0,
+            "samples_ns": [
+              39395766,
+              41156429,
+              39435350,
+              39547399,
+              40176195,
+              39159995,
+              41105934,
+              41118578,
+              42886193
+            ]
+          },
+          {
+            "workload": "upload",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              361355,
+              386142,
+              396381,
+              377115,
+              422450,
+              365914,
+              334276,
+              375301,
+              411489
+            ]
+          },
+          {
+            "workload": "readback",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              21267834,
+              21395743,
+              19649978,
+              20278244,
+              21494989,
+              20468439,
+              21350539,
+              20798987,
+              20591960
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "round": 0,
+      "command": [
+        "/home/addo/dev/stupid/zicr/zig-out/bin/zicr-bench-vulkan",
+        "--mode",
+        "public",
+        "--draws",
+        "10000",
+        "--resources",
+        "1000",
+        "--bytes",
+        "4194304",
+        "--samples",
+        "9",
+        "--warmup",
+        "3"
+      ],
+      "result": {
+        "schema": 1,
+        "backend": "vulkan",
+        "mode": "public",
+        "adapter": "AMD Radeon Graphics (RADV RENOIR)",
+        "zig": "0.17.0",
+        "optimize": "fast",
+        "c_compiler": "Clang 22.1.8",
+        "cpu": "znver3",
+        "validation": false,
+        "statistics": false,
+        "warmup": 3,
+        "results": [
+          {
+            "workload": "draws",
+            "operations": 10000,
+            "bytes": 0,
+            "samples_ns": [
+              4480940,
+              4059832,
+              4170840,
+              3785629,
+              3830834,
+              3832157,
+              3815807,
+              3862173,
+              3788626
+            ]
+          },
+          {
+            "workload": "churn",
+            "operations": 1000,
+            "bytes": 0,
+            "samples_ns": [
+              40289999,
+              39242490,
+              40471558,
+              39441231,
+              39955102,
+              39819358,
+              39546899,
+              41988505,
+              43406516
+            ]
+          },
+          {
+            "workload": "upload",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              471571,
+              510975,
+              432930,
+              442547,
+              690091,
+              371125,
+              354143,
+              348201,
+              338604
+            ]
+          },
+          {
+            "workload": "readback",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              19784860,
+              20170662,
+              19500219,
+              20108225,
+              20047382,
+              19517991,
+              19798917,
+              19589005,
+              19588864
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "round": 1,
+      "command": [
+        "/home/addo/dev/stupid/zicr/zig-out/bin/zicr-bench-vulkan",
+        "--mode",
+        "raw",
+        "--draws",
+        "10000",
+        "--resources",
+        "1000",
+        "--bytes",
+        "4194304",
+        "--samples",
+        "9",
+        "--warmup",
+        "3"
+      ],
+      "result": {
+        "schema": 1,
+        "backend": "vulkan",
+        "mode": "raw",
+        "adapter": "AMD Radeon Graphics (RADV RENOIR)",
+        "zig": "0.17.0",
+        "optimize": "fast",
+        "c_compiler": "Clang 22.1.8",
+        "cpu": "znver3",
+        "validation": false,
+        "statistics": false,
+        "warmup": 3,
+        "results": [
+          {
+            "workload": "draws",
+            "operations": 10000,
+            "bytes": 0,
+            "samples_ns": [
+              4326451,
+              3928767,
+              3936451,
+              3587199,
+              4625681,
+              3702775,
+              3594723,
+              3616283,
+              3637482
+            ]
+          },
+          {
+            "workload": "churn",
+            "operations": 1000,
+            "bytes": 0,
+            "samples_ns": [
+              41187677,
+              39993294,
+              40664168,
+              40722177,
+              41664639,
+              44722608,
+              42967686,
+              40970160,
+              40071620
+            ]
+          },
+          {
+            "workload": "upload",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              350897,
+              338473,
+              343302,
+              363760,
+              461203,
+              356046,
+              332912,
+              479317,
+              377256
+            ]
+          },
+          {
+            "workload": "readback",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              19767017,
+              19776034,
+              20091714,
+              19648525,
+              19941103,
+              19584666,
+              20573686,
+              19865361,
+              19672882
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "round": 1,
+      "command": [
+        "/home/addo/dev/stupid/zicr/zig-out/bin/zicr-bench-vulkan",
+        "--mode",
+        "public",
+        "--draws",
+        "10000",
+        "--resources",
+        "1000",
+        "--bytes",
+        "4194304",
+        "--samples",
+        "9",
+        "--warmup",
+        "3"
+      ],
+      "result": {
+        "schema": 1,
+        "backend": "vulkan",
+        "mode": "public",
+        "adapter": "AMD Radeon Graphics (RADV RENOIR)",
+        "zig": "0.17.0",
+        "optimize": "fast",
+        "c_compiler": "Clang 22.1.8",
+        "cpu": "znver3",
+        "validation": false,
+        "statistics": false,
+        "warmup": 3,
+        "results": [
+          {
+            "workload": "draws",
+            "operations": 10000,
+            "bytes": 0,
+            "samples_ns": [
+              4516166,
+              4043653,
+              4090780,
+              3821496,
+              3767306,
+              3844099,
+              3776262,
+              3814173,
+              3816197
+            ]
+          },
+          {
+            "workload": "churn",
+            "operations": 1000,
+            "bytes": 0,
+            "samples_ns": [
+              43031115,
+              41986892,
+              41527954,
+              41249723,
+              39730652,
+              38589798,
+              41886534,
+              43081348,
+              40751251
+            ]
+          },
+          {
+            "workload": "upload",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              364932,
+              393797,
+              395390,
+              360965,
+              358440,
+              358701,
+              452186,
+              360524,
+              480148
+            ]
+          },
+          {
+            "workload": "readback",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              19625613,
+              20109167,
+              20361228,
+              19982180,
+              20019590,
+              20072849,
+              19796843,
+              19620534,
+              19182223
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "round": 1,
+      "command": [
+        "/home/addo/dev/stupid/zicr/zig-out/bin/zicr-bench-vulkan",
+        "--mode",
+        "c",
+        "--draws",
+        "10000",
+        "--resources",
+        "1000",
+        "--bytes",
+        "4194304",
+        "--samples",
+        "9",
+        "--warmup",
+        "3"
+      ],
+      "result": {
+        "schema": 1,
+        "backend": "vulkan",
+        "mode": "c",
+        "adapter": "AMD Radeon Graphics (RADV RENOIR)",
+        "zig": "0.17.0",
+        "optimize": "fast",
+        "c_compiler": "Clang 22.1.8",
+        "cpu": "znver3",
+        "validation": false,
+        "statistics": false,
+        "warmup": 3,
+        "results": [
+          {
+            "workload": "draws",
+            "operations": 10000,
+            "bytes": 0,
+            "samples_ns": [
+              4163857,
+              4310140,
+              4049653,
+              3633285,
+              3849048,
+              3738903,
+              3532527,
+              3495707,
+              3621754
+            ]
+          },
+          {
+            "workload": "churn",
+            "operations": 1000,
+            "bytes": 0,
+            "samples_ns": [
+              40554172,
+              41077471,
+              39509489,
+              41440500,
+              38291531,
+              40612581,
+              41183770,
+              40937650,
+              41721506
+            ]
+          },
+          {
+            "workload": "upload",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              343151,
+              337060,
+              346357,
+              356937,
+              405889,
+              454460,
+              361316,
+              356507,
+              431206
+            ]
+          },
+          {
+            "workload": "readback",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              19331042,
+              19936033,
+              19665948,
+              19203083,
+              19606687,
+              19199386,
+              19806581,
+              19762829,
+              19484720
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "round": 2,
+      "command": [
+        "/home/addo/dev/stupid/zicr/zig-out/bin/zicr-bench-vulkan",
+        "--mode",
+        "public",
+        "--draws",
+        "10000",
+        "--resources",
+        "1000",
+        "--bytes",
+        "4194304",
+        "--samples",
+        "9",
+        "--warmup",
+        "3"
+      ],
+      "result": {
+        "schema": 1,
+        "backend": "vulkan",
+        "mode": "public",
+        "adapter": "AMD Radeon Graphics (RADV RENOIR)",
+        "zig": "0.17.0",
+        "optimize": "fast",
+        "c_compiler": "Clang 22.1.8",
+        "cpu": "znver3",
+        "validation": false,
+        "statistics": false,
+        "warmup": 3,
+        "results": [
+          {
+            "workload": "draws",
+            "operations": 10000,
+            "bytes": 0,
+            "samples_ns": [
+              4234850,
+              4017823,
+              4030227,
+              3895505,
+              3990062,
+              3971126,
+              3843117,
+              3963513,
+              3953464
+            ]
+          },
+          {
+            "workload": "churn",
+            "operations": 1000,
+            "bytes": 0,
+            "samples_ns": [
+              41229886,
+              40310928,
+              40643880,
+              39722327,
+              39220268,
+              41165626,
+              41174412,
+              42287815,
+              40395155
+            ]
+          },
+          {
+            "workload": "upload",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              343212,
+              341469,
+              432118,
+              336159,
+              319738,
+              350085,
+              310481,
+              360985,
+              346859
+            ]
+          },
+          {
+            "workload": "readback",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              19815879,
+              20274777,
+              20111011,
+              19788247,
+              20208453,
+              19965278,
+              20260750,
+              20293362,
+              19945091
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "round": 2,
+      "command": [
+        "/home/addo/dev/stupid/zicr/zig-out/bin/zicr-bench-vulkan",
+        "--mode",
+        "c",
+        "--draws",
+        "10000",
+        "--resources",
+        "1000",
+        "--bytes",
+        "4194304",
+        "--samples",
+        "9",
+        "--warmup",
+        "3"
+      ],
+      "result": {
+        "schema": 1,
+        "backend": "vulkan",
+        "mode": "c",
+        "adapter": "AMD Radeon Graphics (RADV RENOIR)",
+        "zig": "0.17.0",
+        "optimize": "fast",
+        "c_compiler": "Clang 22.1.8",
+        "cpu": "znver3",
+        "validation": false,
+        "statistics": false,
+        "warmup": 3,
+        "results": [
+          {
+            "workload": "draws",
+            "operations": 10000,
+            "bytes": 0,
+            "samples_ns": [
+              4690882,
+              3771523,
+              3875929,
+              3878513,
+              3496499,
+              3586017,
+              3448269,
+              3459990,
+              3464780
+            ]
+          },
+          {
+            "workload": "churn",
+            "operations": 1000,
+            "bytes": 0,
+            "samples_ns": [
+              39424570,
+              39195792,
+              42388954,
+              39628100,
+              39726986,
+              37604296,
+              40747213,
+              38935996,
+              39612832
+            ]
+          },
+          {
+            "workload": "upload",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              409336,
+              589513,
+              379379,
+              359693,
+              366796,
+              382625,
+              349544,
+              380131,
+              335928
+            ]
+          },
+          {
+            "workload": "readback",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              20000163,
+              20159782,
+              19625413,
+              19955610,
+              19743243,
+              20090182,
+              20045719,
+              19711013,
+              20404970
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "round": 2,
+      "command": [
+        "/home/addo/dev/stupid/zicr/zig-out/bin/zicr-bench-vulkan",
+        "--mode",
+        "raw",
+        "--draws",
+        "10000",
+        "--resources",
+        "1000",
+        "--bytes",
+        "4194304",
+        "--samples",
+        "9",
+        "--warmup",
+        "3"
+      ],
+      "result": {
+        "schema": 1,
+        "backend": "vulkan",
+        "mode": "raw",
+        "adapter": "AMD Radeon Graphics (RADV RENOIR)",
+        "zig": "0.17.0",
+        "optimize": "fast",
+        "c_compiler": "Clang 22.1.8",
+        "cpu": "znver3",
+        "validation": false,
+        "statistics": false,
+        "warmup": 3,
+        "results": [
+          {
+            "workload": "draws",
+            "operations": 10000,
+            "bytes": 0,
+            "samples_ns": [
+              4084047,
+              3910593,
+              3882471,
+              3621684,
+              3667639,
+              3664113,
+              3666818,
+              3729835,
+              3658993
+            ]
+          },
+          {
+            "workload": "churn",
+            "operations": 1000,
+            "bytes": 0,
+            "samples_ns": [
+              40446661,
+              38781597,
+              39292643,
+              41157160,
+              39863381,
+              39981121,
+              39494090,
+              39696739,
+              39049939
+            ]
+          },
+          {
+            "workload": "upload",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              392835,
+              366786,
+              365554,
+              516155,
+              340637,
+              365394,
+              447106,
+              343873,
+              352820
+            ]
+          },
+          {
+            "workload": "readback",
+            "operations": 1,
+            "bytes": 4194304,
+            "samples_ns": [
+              20281539,
+              19747922,
+              20229722,
+              20203133,
+              19856635,
+              20188445,
+              19735819,
+              19958034,
+              20242316
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "summary": [
+    {
+      "mode": "c",
+      "workload": "draws",
+      "samples": 27,
+      "median_ns": 3771523,
+      "min_ns": 3448269,
+      "max_ns": 5220212,
+      "mean_ns": 3864785.1481481483,
+      "stdev_ns": 424930.2484521343,
+      "coefficient_of_variation": 0.10994925517547696,
+      "cpu_ns_per_operation": 377.1523,
+      "operations": 10000,
+      "bytes": 0,
+      "time_relative_to_c": 1.0
+    },
+    {
+      "mode": "c",
+      "workload": "churn",
+      "samples": 27,
+      "median_ns": 40554172,
+      "min_ns": 37604296,
+      "max_ns": 44345022,
+      "mean_ns": 40486894.44444445,
+      "stdev_ns": 1466173.2069352497,
+      "coefficient_of_variation": 0.036213526057107495,
+      "cpu_ns_per_operation": 40554.172,
+      "operations": 1000,
+      "bytes": 0,
+      "time_relative_to_c": 1.0
+    },
+    {
+      "mode": "c",
+      "workload": "upload",
+      "samples": 27,
+      "median_ns": 372136,
+      "min_ns": 335928,
+      "max_ns": 589513,
+      "mean_ns": 389110.6296296296,
+      "stdev_ns": 59549.932124968196,
+      "coefficient_of_variation": 0.15304113429553468,
+      "cpu_ns_per_operation": 372136.0,
+      "operations": 1,
+      "bytes": 4194304,
+      "GiB_per_second": 10.496834490616333,
+      "time_relative_to_c": 1.0
+    },
+    {
+      "mode": "c",
+      "workload": "readback",
+      "samples": 27,
+      "median_ns": 19886861,
+      "min_ns": 19199386,
+      "max_ns": 21155083,
+      "mean_ns": 19907685.888888888,
+      "stdev_ns": 497151.64585229027,
+      "coefficient_of_variation": 0.024972849613312736,
+      "cpu_ns_per_operation": 19886861.0,
+      "operations": 1,
+      "bytes": 4194304,
+      "GiB_per_second": 0.19642365881674337,
+      "time_relative_to_c": 1.0
+    },
+    {
+      "mode": "raw",
+      "workload": "draws",
+      "samples": 27,
+      "median_ns": 3788986,
+      "min_ns": 3587199,
+      "max_ns": 4625681,
+      "mean_ns": 3843612.962962963,
+      "stdev_ns": 237327.4787392504,
+      "coefficient_of_variation": 0.061745935666815806,
+      "cpu_ns_per_operation": 378.8986,
+      "operations": 10000,
+      "bytes": 0,
+      "time_relative_to_c": 1.0046302249780792
+    },
+    {
+      "mode": "raw",
+      "workload": "churn",
+      "samples": 27,
+      "median_ns": 40176195,
+      "min_ns": 38781597,
+      "max_ns": 44722608,
+      "mean_ns": 40544785.14814815,
+      "stdev_ns": 1355155.1833490597,
+      "coefficient_of_variation": 0.033423661721166016,
+      "cpu_ns_per_operation": 40176.195,
+      "operations": 1000,
+      "bytes": 0,
+      "time_relative_to_c": 0.9906797012154508
+    },
+    {
+      "mode": "raw",
+      "workload": "upload",
+      "samples": 27,
+      "median_ns": 365914,
+      "min_ns": 332912,
+      "max_ns": 516155,
+      "mean_ns": 382398.1111111111,
+      "stdev_ns": 46593.9770128264,
+      "coefficient_of_variation": 0.12184677606654774,
+      "cpu_ns_per_operation": 365914.0,
+      "operations": 1,
+      "bytes": 4194304,
+      "GiB_per_second": 10.675322616789737,
+      "time_relative_to_c": 0.9832803061246426
+    },
+    {
+      "mode": "raw",
+      "workload": "readback",
+      "samples": 27,
+      "median_ns": 20188445,
+      "min_ns": 19584666,
+      "max_ns": 21494989,
+      "mean_ns": 20246713.555555556,
+      "stdev_ns": 577427.2500253792,
+      "coefficient_of_variation": 0.028519554466998286,
+      "cpu_ns_per_operation": 20188445.0,
+      "operations": 1,
+      "bytes": 4194304,
+      "GiB_per_second": 0.19348939455218073,
+      "time_relative_to_c": 1.0151649875764708
+    },
+    {
+      "mode": "public",
+      "workload": "draws",
+      "samples": 27,
+      "median_ns": 3895505,
+      "min_ns": 3767306,
+      "max_ns": 4516166,
+      "mean_ns": 3963579.888888889,
+      "stdev_ns": 199056.5716323519,
+      "coefficient_of_variation": 0.050221410243393244,
+      "cpu_ns_per_operation": 389.5505,
+      "operations": 10000,
+      "bytes": 0,
+      "time_relative_to_c": 1.0328731920765166
+    },
+    {
+      "mode": "public",
+      "workload": "churn",
+      "samples": 27,
+      "median_ns": 40643880,
+      "min_ns": 38589798,
+      "max_ns": 43406516,
+      "mean_ns": 40820267.481481485,
+      "stdev_ns": 1276603.2289940775,
+      "coefficient_of_variation": 0.03127375952578511,
+      "cpu_ns_per_operation": 40643.88,
+      "operations": 1000,
+      "bytes": 0,
+      "time_relative_to_c": 1.00221205354655
+    },
+    {
+      "mode": "public",
+      "workload": "upload",
+      "samples": 27,
+      "median_ns": 360965,
+      "min_ns": 310481,
+      "max_ns": 690091,
+      "mean_ns": 393569.48148148146,
+      "stdev_ns": 79120.35639083727,
+      "coefficient_of_variation": 0.20103275308088162,
+      "cpu_ns_per_operation": 360965.0,
+      "operations": 1,
+      "bytes": 4194304,
+      "GiB_per_second": 10.821686313077445,
+      "time_relative_to_c": 0.9699814046477632
+    },
+    {
+      "mode": "public",
+      "workload": "readback",
+      "samples": 27,
+      "median_ns": 19965278,
+      "min_ns": 19182223,
+      "max_ns": 20361228,
+      "mean_ns": 19908859.259259257,
+      "stdev_ns": 293289.13112419297,
+      "coefficient_of_variation": 0.014731588952681424,
+      "cpu_ns_per_operation": 19965278.0,
+      "operations": 1,
+      "bytes": 4194304,
+      "GiB_per_second": 0.19565217173534974,
+      "time_relative_to_c": 1.0039431562376788
+    }
+  ]
+}

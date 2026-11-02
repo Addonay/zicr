@@ -1,7 +1,7 @@
 //! Native offscreen GL/GLES verification. Uses EGL through runtime-loaded
 //! function pointers; the library itself has no C imports or C compilation.
 const std = @import("std");
-const gfx = @import("sokol_gfx");
+const gfx = @import("zicr").gpu.raw;
 
 const Egl = struct {
     library: std.DynLib,
@@ -146,7 +146,90 @@ fn run(egl: *Egl, display: *anyopaque, backend: gfx.Backend, legacy: bool) !void
         try compute(&loader, es);
         try computeRender(&loader, es, view, vertex);
     }
+    try readback(shader, pipeline);
     if (get_error() != 0) return error.GlPostChecksError;
+}
+
+/// Verifies the readback extension: rendered images, sub-regions with padded
+/// rows, mip levels of array layers, and buffers written by compute.
+fn readback(shader: gfx.Shader, pipeline: gfx.Pipeline) !void {
+    _ = shader;
+    const image = gfx.makeImage(.{ .width = 16, .height = 8, .usage = .{ .color_attachment = true, .copy_src = true } });
+    const view = gfx.makeView(.{ .color_attachment = .{ .image = image } });
+    var pass: gfx.Pass = .{};
+    pass.attachments.colors[0] = view;
+    pass.action.colors[0] = .{ .load_action = .clear, .clear_value = .{ .r = 1, .g = 0, .b = 0, .a = 1 } };
+    gfx.beginPass(pass);
+    gfx.applyPipeline(pipeline);
+    gfx.applyScissorRect(8, 0, 8, 8, false);
+    const color = [_]f32{ 0, 1, 0, 1 };
+    gfx.applyUniforms(0, gfx.Range.fromSlice(f32, &color));
+    gfx.draw(0, 3, 1);
+    gfx.endPass();
+    gfx.commit();
+    var pixels: [16 * 8 * 4]u8 = undefined;
+    if (!gfx.readImage(.{ .image = image }, &pixels)) return error.ReadImageFailed;
+    for (0..8) |y| for (0..16) |x| {
+        const p = pixels[(y * 16 + x) * 4 ..][0..4];
+        const want: [4]u8 = if (x < 8) .{ 255, 0, 0, 255 } else .{ 0, 255, 0, 255 };
+        if (!std.mem.eql(u8, p, &want)) {
+            std.debug.print("readback pixel ({d},{d}) = {any}, expected {any}\n", .{ x, y, p, want });
+            return error.ReadImageMismatch;
+        }
+    };
+    // a 4x2 region straddling the scissor edge into rows padded to 32 bytes
+    var region: [32 * 2]u8 = @splat(0xAA);
+    if (!gfx.readImage(.{ .image = image, .x = 6, .y = 3, .width = 4, .height = 2, .bytes_per_row = 32 }, &region)) return error.ReadRegionFailed;
+    for (0..2) |row| {
+        const line = region[row * 32 ..][0..32];
+        if (!std.mem.eql(u8, line[0..16], &[_]u8{ 255, 0, 0, 255, 255, 0, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255 })) return error.ReadRegionMismatch;
+        for (line[16..]) |b| if (b != 0xAA) return error.ReadRegionPaddingOverwritten;
+    }
+
+    // mip level 1 of layer 1 of an uploaded 4x4x2 array texture
+    var mip0: [4 * 4 * 4 * 2]u8 = undefined;
+    for (&mip0, 0..) |*b, i| b.* = @truncate(i);
+    var mip1: [2 * 2 * 4 * 2]u8 = undefined;
+    for (&mip1, 0..) |*b, i| b.* = @truncate(200 + i);
+    var array_desc: gfx.ImageDesc = .{ .type = .array, .width = 4, .height = 4, .num_slices = 2, .num_mipmaps = 2, .usage = .{ .copy_src = true } };
+    array_desc.data.mip_levels[0] = gfx.Range.fromSlice(u8, &mip0);
+    array_desc.data.mip_levels[1] = gfx.Range.fromSlice(u8, &mip1);
+    const array = gfx.makeImage(array_desc);
+    var layer: [2 * 2 * 4]u8 = undefined;
+    if (!gfx.readImage(.{ .image = array, .mip_level = 1, .slice = 1, .num_slices = 1 }, &layer)) return error.ReadMipFailed;
+    if (!std.mem.eql(u8, &layer, mip1[16..32])) {
+        std.debug.print("mip readback {any}, expected {any}\n", .{ layer, mip1[16..32] });
+        return error.ReadMipMismatch;
+    }
+    gfx.destroyImage(array);
+    gfx.destroyView(view);
+    gfx.destroyImage(image);
+
+    if (gfx.queryFeatures().compute) {
+        const buffer = gfx.makeBuffer(.{ .size = 16, .usage = .{ .storage_buffer = true, .copy_src = true } });
+        const storage = gfx.makeView(.{ .storage_buffer = .{ .buffer = buffer } });
+        const es = gfx.queryBackend() == .gles3;
+        const source = if (es) "#version 310 es\nprecision highp int; layout(local_size_x=1) in; layout(std430,binding=0) buffer Data {uint values[];}; void main(){ uint i=gl_GlobalInvocationID.x; values[i]=7u*i+1u; }" else "#version 430 core\nlayout(local_size_x=1) in; layout(std430,binding=0) buffer Data {uint values[];}; void main(){ uint i=gl_GlobalInvocationID.x; values[i]=7u*i+1u; }";
+        var desc: gfx.ShaderDesc = .{ .compute_func = .{ .source = source } };
+        desc.views[0].storage_buffer = .{ .stage = .compute };
+        const cs = gfx.makeShader(desc);
+        const cpip = gfx.makePipeline(.{ .shader = cs, .compute = true });
+        gfx.beginPass(.{ .compute = true });
+        gfx.applyPipeline(cpip);
+        var bindings: gfx.Bindings = .{};
+        bindings.views[0] = storage;
+        gfx.applyBindings(bindings);
+        gfx.dispatch(4, 1, 1);
+        gfx.endPass();
+        gfx.commit();
+        var values: [2]u32 = undefined;
+        if (!gfx.readBuffer(buffer, 4, std.mem.asBytes(&values))) return error.ReadBufferFailed;
+        if (!std.mem.eql(u32, &values, &.{ 8, 15 })) {
+            std.debug.print("buffer readback {any}\n", .{values});
+            return error.ReadBufferMismatch;
+        }
+    }
+    std.debug.print("  readback of rendered images, padded regions, array mips and compute buffers passed\n", .{});
 }
 
 fn checkPixel(loader: *Loader, expected: [4]i32) !void {

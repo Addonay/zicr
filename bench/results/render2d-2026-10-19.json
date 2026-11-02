@@ -1,0 +1,168 @@
+{
+  "date": "2026-10-19",
+  "zig": "0.17.0",
+  "optimization": "ReleaseFast",
+  "validation_compiled": false,
+  "native_validation_requested": false,
+  "statistics_enabled": false,
+  "warmup_frames": 3,
+  "samples": 9,
+  "gpu_drain_and_pixel_verification": "outside timing, every frame",
+  "vulkan_descriptor_set_capacity": 12000,
+  "adapters": {
+    "gl": "4.6 (Core Profile) Mesa 26.2.4; AMD Radeon Graphics (radeonsi, renoir, ACO, DRM 3.64, 7.2.8-200.fc44.x86_64)",
+    "vulkan": "AMD Radeon Graphics (RADV RENOIR)"
+  },
+  "commands": [
+    "zig build bench-render2d -- gl",
+    "zig build bench-render2d -- vulkan"
+  ],
+  "source_sha256": {
+    "tools/render2d/main.zig": "0420760ec0363fb197a416c3b6847c72468369063914f6ccb236dae6f303d2bb",
+    "src/render2d/draw_list.zig": "34fbea37bd1fd3cddf924735cae905c6424413f740e2beb98e85467d9abf1dab",
+    "src/render2d/renderer.zig": "cf6c69be30b01ac83c507d35e17c514962cca5238c2ffe6a6d7966bd188b3ab2",
+    "src/render2d/shaders.glsl": "654d16f96b7cd21db04db865440bf64925e29ce1648bf8c6ba0462f035c85e0f"
+  },
+  "results": [
+    {
+      "backend": "gl",
+      "workload": "batched",
+      "quads": 10000,
+      "batches": 1,
+      "upload_bytes": 2160000,
+      "cpu_allocations": 0,
+      "gpu_allocator_calls": 0,
+      "encode_ns": [
+        122279,
+        110167,
+        109766,
+        181340,
+        111629,
+        110547,
+        111178,
+        121247,
+        110958
+      ],
+      "submit_commit_ns": [
+        82855,
+        79348,
+        79118,
+        116017,
+        107962,
+        100348,
+        96912,
+        97413,
+        101259
+      ],
+      "encode_mean_ms": 0.12101233333333333,
+      "encode_cv_percent": 18.02185567529959,
+      "submit_commit_mean_ms": 0.09569244444444444,
+      "submit_commit_cv_percent": 12.691136817528207
+    },
+    {
+      "backend": "gl",
+      "workload": "fragmented",
+      "quads": 10000,
+      "batches": 10000,
+      "upload_bytes": 2160000,
+      "cpu_allocations": 0,
+      "gpu_allocator_calls": 0,
+      "encode_ns": [
+        128891,
+        127418,
+        127208,
+        133140,
+        126978,
+        127680,
+        127369,
+        135804,
+        131016
+      ],
+      "submit_commit_ns": [
+        4182808,
+        4216822,
+        4299206,
+        4351444,
+        4331877,
+        4348458,
+        4310698,
+        4446352,
+        4324433
+      ],
+      "encode_mean_ms": 0.12950044444444445,
+      "encode_cv_percent": 2.294483837955891,
+      "submit_commit_mean_ms": 4.312455333333333,
+      "submit_commit_cv_percent": 1.6828079477049303
+    },
+    {
+      "backend": "vulkan",
+      "workload": "batched",
+      "quads": 10000,
+      "batches": 1,
+      "upload_bytes": 2160000,
+      "cpu_allocations": 0,
+      "gpu_allocator_calls": 0,
+      "encode_ns": [
+        110247,
+        110427,
+        110718,
+        110287,
+        110367,
+        110126,
+        110507,
+        121989,
+        110577
+      ],
+      "submit_commit_ns": [
+        183453,
+        180688,
+        180027,
+        189445,
+        178795,
+        179497,
+        208301,
+        209152,
+        240230
+      ],
+      "encode_mean_ms": 0.11169388888888888,
+      "encode_cv_percent": 3.26229626043659,
+      "submit_commit_mean_ms": 0.19439866666666666,
+      "submit_commit_cv_percent": 10.16718936060532
+    },
+    {
+      "backend": "vulkan",
+      "workload": "fragmented",
+      "quads": 10000,
+      "batches": 10000,
+      "upload_bytes": 2160000,
+      "cpu_allocations": 0,
+      "gpu_allocator_calls": 0,
+      "encode_ns": [
+        153177,
+        163677,
+        145993,
+        146825,
+        144681,
+        156724,
+        175529,
+        154640,
+        156814
+      ],
+      "submit_commit_ns": [
+        7307673,
+        7393825,
+        6817575,
+        6550615,
+        6581011,
+        6680187,
+        6725993,
+        6546406,
+        6504719
+      ],
+      "encode_mean_ms": 0.15534,
+      "encode_cv_percent": 5.91503933233663,
+      "submit_commit_mean_ms": 6.789778222222222,
+      "submit_commit_cv_percent": 4.634611323854194
+    }
+  ]
+}

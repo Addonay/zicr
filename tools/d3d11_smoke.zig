@@ -1,6 +1,6 @@
 //! Native Windows D3D11 smoke test; all rendering goes through sokol_gfx.
 const std = @import("std");
-const gfx = @import("sokol_gfx");
+const gfx = @import("zicr").gpu.raw;
 const sdk = gfx.native.d3d11;
 const Library = gfx.native.WindowsLibrary;
 
@@ -76,6 +76,7 @@ pub fn main() !void {
     try textureCopy(device.?, context.?, image, view, vertex);
     try multisample(device.?, context.?, shader);
     try compute(device.?, context.?);
+    try readback(shader, pipeline);
 }
 
 fn checkImage(device: *sdk.Object, context: *sdk.Object, image: gfx.Image, expected: [4]i32) !void {
@@ -219,4 +220,66 @@ fn compute(device: *sdk.Object, context: *sdk.Object) !void {
     }
     gfx.commit();
     std.debug.print("  compute storage buffer and GPU copy readback {any} passed\n", .{values});
+}
+
+/// Verifies the readback extension: rendered images, sub-regions with padded
+/// rows, mip levels of array layers, immutable and transient buffers.
+fn readback(shader: gfx.Shader, pipeline: gfx.Pipeline) !void {
+    _ = shader;
+    const image = gfx.makeImage(.{ .width = 16, .height = 8, .usage = .{ .color_attachment = true, .copy_src = true } });
+    const view = gfx.makeView(.{ .color_attachment = .{ .image = image } });
+    var pass: gfx.Pass = .{};
+    pass.attachments.colors[0] = view;
+    pass.action.colors[0] = .{ .load_action = .clear, .clear_value = .{ .r = 1, .g = 0, .b = 0, .a = 1 } };
+    gfx.beginPass(pass);
+    gfx.applyPipeline(pipeline);
+    gfx.applyScissorRect(8, 0, 8, 8, true);
+    const color = [_]f32{ 0, 1, 0, 1 };
+    gfx.applyUniforms(0, gfx.Range.fromSlice(f32, &color));
+    gfx.draw(0, 3, 1);
+    gfx.endPass();
+    gfx.commit();
+    var pixels: [16 * 8 * 4]u8 = undefined;
+    if (!gfx.readImage(.{ .image = image }, &pixels)) return error.ReadImageFailed;
+    for (0..8) |y| for (0..16) |x| {
+        const p = pixels[(y * 16 + x) * 4 ..][0..4];
+        const want: [4]u8 = if (x < 8) .{ 255, 0, 0, 255 } else .{ 0, 255, 0, 255 };
+        if (!std.mem.eql(u8, p, &want)) {
+            std.debug.print("readback pixel ({d},{d}) = {any}, expected {any}\n", .{ x, y, p, want });
+            return error.ReadImageMismatch;
+        }
+    };
+    var region: [32 * 2]u8 = @splat(0xAA);
+    if (!gfx.readImage(.{ .image = image, .x = 6, .y = 3, .width = 4, .height = 2, .bytes_per_row = 32 }, &region)) return error.ReadRegionFailed;
+    for (0..2) |row| {
+        const line = region[row * 32 ..][0..32];
+        if (!std.mem.eql(u8, line[0..16], &[_]u8{ 255, 0, 0, 255, 255, 0, 0, 255, 0, 255, 0, 255, 0, 255, 0, 255 })) return error.ReadRegionMismatch;
+        for (line[16..]) |b| if (b != 0xAA) return error.ReadRegionPaddingOverwritten;
+    }
+
+    var mip0: [4 * 4 * 4 * 2]u8 = undefined;
+    for (&mip0, 0..) |*b, i| b.* = @truncate(i);
+    var mip1: [2 * 2 * 4 * 2]u8 = undefined;
+    for (&mip1, 0..) |*b, i| b.* = @truncate(200 + i);
+    var array_desc: gfx.ImageDesc = .{ .type = .array, .width = 4, .height = 4, .num_slices = 2, .num_mipmaps = 2, .usage = .{ .copy_src = true } };
+    array_desc.data.mip_levels[0] = gfx.Range.fromSlice(u8, &mip0);
+    array_desc.data.mip_levels[1] = gfx.Range.fromSlice(u8, &mip1);
+    const array = gfx.makeImage(array_desc);
+    var layer: [2 * 2 * 4]u8 = undefined;
+    if (!gfx.readImage(.{ .image = array, .mip_level = 1, .slice = 1, .num_slices = 1 }, &layer)) return error.ReadMipFailed;
+    if (!std.mem.eql(u8, &layer, mip1[16..32])) return error.ReadMipMismatch;
+
+    const data = [_]u32{ 10, 20, 30, 40 };
+    const immutable = gfx.makeBuffer(.{ .usage = .{ .copy_src = true }, .data = gfx.Range.fromSlice(u32, &data) });
+    var two: [2]u32 = undefined;
+    if (!gfx.readBuffer(immutable, 4, std.mem.asBytes(&two)) or !std.mem.eql(u32, &two, &.{ 20, 30 })) return error.ReadBufferMismatch;
+    const transient = gfx.makeBuffer(.{ .size = 16, .usage = .{ .copy_src = true, .write_transient = true } });
+    for (0..2) |frame| {
+        const values = [_]u32{ 1 + @as(u32, @intCast(frame)), 2, 3, 4 };
+        gfx.writeBufferTransient(.{ .src = .{ .data = gfx.Range.fromSlice(u32, &values) }, .dst = .{ .buffer = transient } });
+        gfx.commit();
+        var first: u32 = 0;
+        if (!gfx.readBuffer(transient, 0, std.mem.asBytes(&first)) or first != values[0]) return error.ReadTransientMismatch;
+    }
+    std.debug.print("  readback of rendered images, padded regions, array mips and buffers passed\n", .{});
 }
